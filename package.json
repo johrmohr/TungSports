@@ -1,0 +1,37 @@
+{
+  "name": "tung-sports",
+  "version": "1.0.0",
+  "description": "Tung Sports — Tennis, Golf, Bowling and Krishiv Kart in the browser from one games menu, with phones as motion controllers",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "postinstall": "npm install --prefix games/bowling --no-audit --no-fund && npm install --prefix games/krishiv-kart --no-audit --no-fund",
+    "test": "node tools/tennis-test.mjs && node tools/golf-test.mjs && node tools/swing-test.mjs && node tools/net-test.mjs",
+    "test:bowling": "npm test --prefix games/bowling",
+    "test:kart": "npm test --prefix games/krishiv-kart",
+    "test:all": "npm test && npm run test:bowling && npm run test:kart",
+    "test:e2e": "node tools/e2e.mjs",
+    "tour": "node tools/e2e.mjs --tour screenshots"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "license": "ISC",
+  "private": true,
+  "dependencies": {
+    "express": "^5.3.0",
+    "qrcode": "^1.5.4",
+    "selfsigned": "^5.5.0",
+    "socket.io": "^4.8.4",
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^25.14.0",
+    "socket.io-client": "^4.8.4"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/johrmohr/TungSports.git"
+  }
+}

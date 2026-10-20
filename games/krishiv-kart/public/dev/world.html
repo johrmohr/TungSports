@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KRISHIV KART — world sandbox</title>
+<link rel="icon" href="data:,">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #info { position: fixed; left: 8px; top: 6px; font: 12px/1.35 ui-monospace, Menlo, monospace; color: #fff;
+          text-shadow: 0 1px 2px #000, 0 0 4px #000; pointer-events: none; white-space: pre; }
+</style>
+<script type="importmap">{"imports":{"three":"/vendor/three/build/three.module.js","three/addons/":"/vendor/three/examples/jsm/"}}</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="info"></div>
+<script type="module">
+// World sandbox. URL params:
+//   ?track=<id>          which course (tracks.js id: breezy, monte, aldrich, laguna, palace; default breezy)
+//   ?view=N | name       camera preset (see VIEWS below; per track)
+//   ?quality=low         build the low-quality (split-screen) world
+//   ?karts=1             place kart models on the grid (shadow check)
+//   ?chase=S&lat=L       chase camera at arc length S (lateral L)
+//   ?hud=0               hide the text overlay
+//   ?time=T              hazard / animation clock (castle hazards are drawn at world.hazards.time)
+// Console helpers: setView(n), chaseAt(s, lat), verifyProps(), verifyFeatures(), verifyGround(), stats(),
+// setTime(t) (advances the world + hazards to t seconds).
+import * as THREE from 'three';
+import { getTrack } from '../js/tracks.js';
+import { buildWorld } from '../js/worlds.js';
+
+const params = new URLSearchParams(location.search);
+const quality = params.get('quality') || 'high';
+const trackId = params.get('track') || 'breezy';
+const canvas = document.getElementById('c');
+const info = document.getElementById('info');
+if (params.get('hud') === '0') info.style.display = 'none';
+
+// Same renderer settings as SPEC §12 (main.js). three r186 removed
+// PCFSoftShadowMap (it falls back to PCFShadowMap with a warning); PCFShadowMap
+// is the soft Vogel-disk filter that honours light.shadow.radius.
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(window.innerWidth, window.innerHeight, false);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 2000);
+const track = getTrack(trackId);
+
+const tb = performance.now();
+const world = buildWorld(scene, track, { renderer, quality });
+const buildMs = performance.now() - tb;
+console.log(`[world] ${track.id} built in ${buildMs.toFixed(0)} ms (quality ${quality}); instances ${JSON.stringify(world.stats.instances)}`);
+
+// ------------------------------------------------------------ optional karts
+const karts = [];
+if (params.get('karts') === '1') {
+  try {
+    const { CHARACTERS, buildKartModel } = await import('../js/characters.js');
+    for (let i = 0; i < 8; i++) {
+      const g = track.gridSlot(i);
+      const m = buildKartModel(CHARACTERS[i % CHARACTERS.length]);
+      m.position.copy(g.position); m.rotation.y = g.yaw;
+      scene.add(m); karts.push(m);
+    }
+  } catch (err) {
+    console.warn('[world] kart models unavailable, using boxes', err.message);
+    for (let i = 0; i < 8; i++) {
+      const g = track.gridSlot(i);
+      const m = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1.2, 2.2), new THREE.MeshStandardMaterial({ color: 0xff5522 }));
+      m.position.copy(g.position).y += 0.6; m.rotation.y = g.yaw; m.castShadow = m.receiveShadow = true;
+      scene.add(m); karts.push(m);
+    }
+  }
+}
+
+// ------------------------------------------------------------ viewpoints
+const focus = new THREE.Vector3();
+const zone = (type) => track.zones.find((z) => z.type === type);
+const P = (s, lat = 0) => track.pointAt(s, lat);
+function chase(s, { back = 6.5, up = 2.6, ahead = 16, lat = 0, lookY = 1.0 } = {}) {
+  const c = P(s - back, lat), t = P(s + ahead, lat);
+  camera.position.set(c.x, c.y + up, c.z);
+  camera.lookAt(t.x, t.y + lookY, t.z);
+  focus.copy(P(s, lat));
+}
+function frameSide(s, side, dist, height, { lookUp = 0, ahead = 0 } = {}) {
+  const f = track.frameAt(s);
+  const c = new THREE.Vector3(f.x + f.right.x * side * dist + f.tangent.x * ahead, f.y + height, f.z + f.right.z * side * dist + f.tangent.z * ahead);
+  camera.position.copy(c);
+  camera.lookAt(f.x, f.y + lookUp, f.z);
+  focus.set(f.x, f.y, f.z);
+}
+function look(cam, target, foc = target) {
+  camera.position.set(...cam);
+  camera.lookAt(...target);
+  focus.set(...foc);
+}
+
+const L = track.length;
+const hair = zone('hairpin'), bridge = zone('bridge');
+const ramp = track.ramps[0];
+const b = track.bounds, cx = (b.minX + b.maxX) / 2, cz = (b.minZ + b.maxZ) / 2;
+const segS = (i) => track.segments[i].s0;
+const segMid = (i) => (track.segments[i].s0 + track.segments[i].s1) / 2;
+
+// Breezy Bay viewpoints (indices kept stable for older notes / screenshots).
+function breezyViews() {
+const hill = zone('hill'), cliff = zone('cliff');
+const crestS = (() => { let best = 0, bi = 0; for (let i = 0; i < track.N; i++) if (track.py[i] > best) { best = track.py[i]; bi = i; } return bi * track.spacing; })();
+return [
+  { name: 'overview', set: () => look([cx + 140, 330, cz + 300], [cx, 0, cz - 10], [cx, 0, cz]) },
+  { name: 'start-chase', set: () => chase(track.gridSlot(7).s, { lat: track.gridSlot(7).lateral }) },
+  { name: 'hairpin', set: () => chase(hair.s0 + 6, { ahead: 18 }) },
+  { name: 'lighthouse', set: () => { const m = track.frameAt((hair.s0 + hair.s1) / 2); look([m.x + 40, m.y + 16, m.z - 52], [m.x - 30, m.y + 6, m.z + 25], [m.x, m.y, m.z]); } },
+  { name: 'bridge-chase', set: () => chase(bridge.s0 - 4, { ahead: 26 }) },
+  { name: 'bridge-side', set: () => frameSide((bridge.s0 + bridge.s1) / 2, -1, 70, 8, { lookUp: 3 }) },
+  { name: 'hill-crest', set: () => chase(crestS - 22, { ahead: 20 }) },
+  { name: 'kicker-ramp', set: () => chase(ramp.s0 - 9, { ahead: 14, lookY: 0.6 }) },
+  { name: 'cliff-chase', set: () => chase(cliff.s0 + 40, { ahead: 22 }) },
+  { name: 'cliff-sea', set: () => { const s = (cliff.s0 + cliff.s1) / 2; frameSide(s, -1, 95, 14, { lookUp: 0 }); } },
+  { name: 'grid-front', set: () => { const f = track.frameAt(4); look([f.x + f.tangent.x * 14, f.y + 3.2, f.z + f.tangent.z * 14], [f.x - f.tangent.x * 20, f.y + 2.5, f.z - f.tangent.z * 20], [f.x - f.tangent.x * 15, f.y, f.z - f.tangent.z * 15]); } },
+  { name: 'grandstand', set: () => { const f = track.frameAt(L - 20); look([f.x + f.right.x * 9 + f.tangent.x * 30, f.y + 4, f.z + f.right.z * 9 + f.tangent.z * 30], [f.x - f.right.x * 16, f.y + 3, f.z - f.right.z * 16], [f.x, f.y, f.z]); } },
+  { name: 'boost-pad', set: () => { const p = track.boostPads[0]; chase(p.s0 - 2, { lat: p.lateral, back: 5, up: 2.2, ahead: 10, lookY: 0 }); } },
+  { name: 'esses', set: () => chase(segS(segI('Esses A')) - 10, { ahead: 22 }) },
+  { name: 'top', set: () => look([cx, 700, cz + 0.01], [cx, 0, cz], [cx, 0, cz]) },
+  { name: 'turn1', set: () => chase(segS(segI('Turn 1 Entry')) - 2, { ahead: 22 }) },
+  { name: 'harbor', set: () => chase(segS(segI('Harbor Kink')) + 4, { ahead: 22 }) },
+  { name: 'ramp-side', set: () => frameSide(ramp.s0 + ramp.length * 0.6, 1, 14, 3.5, { lookUp: 0.6 }) },
+  { name: 'hill-side', set: () => frameSide(crestS, 1, 60, 10, { lookUp: 3 }) },
+  { name: 'home', set: () => chase(segS(segI('Home Straight')) + 5, { ahead: 22 }) },
+  { name: 'kart-close', set: () => { const g = track.gridSlot(6), f = track.frameAt(g.s); const c = P(g.s - 4.5, g.lateral + 2.2); look([c.x, c.y + 1.9, c.z], [g.position.x, g.position.y + 0.4, g.position.z], [g.position.x, g.position.y, g.position.z]); } },
+  { name: 'lagoon', set: () => { const m = track.frameAt((bridge.s0 + bridge.s1) / 2); look([m.x + 10, 95, m.z + 75], [m.x, 0, m.z + 22], [m.x, m.y, m.z]); } },
+  { name: 'cliff-face', set: () => { const s = (cliff.s0 + cliff.s1) / 2 - 20; frameSide(s, -1, 38, 2.5, { lookUp: 2, ahead: -25 }); } },
+  { name: 'hairpin-exit', set: () => chase(hair.s1 - 18, { ahead: 26 }) },
+  { name: 'bridge-under', set: () => { const f = track.frameAt(bridge.s0 + 30); look([f.x + f.right.x * 26 + f.tangent.x * 6, -0.6, f.z + f.right.z * 26 + f.tangent.z * 6], [f.x + f.tangent.x * 30, 2, f.z + f.tangent.z * 30], [f.x, f.y, f.z]); } },
+  // v5 (SPEC §16.1): the beach loop, its set pieces (?time=T picks the hazard clock) and the new landmarks
+  { name: 'crab-cove', set: () => chase(hzS('crab') - 34, { ahead: 26 }) },
+  { name: 'crabs-close', set: () => { const s = hzS('crab'); const c = P(s - 11, -2), t = P(s + 2, 0); camera.position.set(c.x, c.y + 2.2, c.z); camera.lookAt(t.x, t.y + 0.8, t.z); focus.copy(P(s)); } },
+  { name: 'crab-beach', set: () => frameSide(hzS('crab') + 3, -1, 34, 9, { lookUp: 0.5 }) },
+  { name: 'spit-turn', set: () => { const a = track.segments[segI('Spit Turn A')], b = track.segments[segI('Spit Turn B')]; const f = track.frameAt((a.s1 + b.s0) / 2); look([f.x + 70, 46, f.z + 22], [f.x + 22, 0, f.z], [f.x, f.y, f.z]); } },
+  { name: 'causeway-chase', set: () => chase(hzS('surge') - 10, { ahead: 26, lat: 2 }) },
+  { name: 'causeway-sea', set: () => { const s = hzS('surge') + 20; frameSide(s, -1, 40, 7, { lookUp: 0 }); } },
+  { name: 'spit-lagoon', set: () => { const f = track.frameAt(segS(segI('Tide Causeway')) + 20); look([f.x - 10, 34, f.z - 30], [f.x - 30, 0, f.z + 40], [f.x, f.y, f.z]); } },
+  { name: 'gull-gap', set: () => chase(track.ramps[1].s0 - 26, { ahead: 30 }) },
+  { name: 'gull-gap-sea', set: () => { const z = zone('gap'); frameSide(z.s0 + 22, -1, 55, 6, { lookUp: 2 }); } },
+  { name: 'promenade', set: () => chase(hzS('ball') - 34, { ahead: 30 }) },
+  { name: 'balls-side', set: () => { const s = hzS('ball'), c = P(s - 24, 7), t = P(s + 2, -5); look([c.x, c.y + 8, c.z], [t.x, t.y + 1.5, t.z], [t.x, t.y, t.z]); } },
+  { name: 'harbour-bay', set: () => { const z = zone('harbor'); frameSide((z.s0 + z.s1) / 2, -1, 48, 10, { lookUp: 2 }); } },
+  { name: 'ramp-run', set: () => chase(track.ramps[0].s0 - 30, { ahead: 30 }) },
+  { name: 'pier', set: () => { const f = track.frameAt(L - 30); look([f.x - 12, 9, f.z - 40], [f.x + 110, 12, f.z + 10], [f.x, f.y, f.z]); } },
+  { name: 'cliffs-sea', set: () => { const s = segS(segI('Cliff Sweep A')) + 20; frameSide(s, -1, 90, 16, { lookUp: 0 }); } },
+  { name: 'gap-deck', set: () => chase(zone('gap').s0 + 12, { ahead: 26, lookY: 0.4 }) },
+];
+}
+function segI(name) { return track.def.segments ? track.def.segments.findIndex((g) => g.name === name) : -1; }
+function hzS(type) { const d = (track.def.hazards || []).find((h) => h.type === type); return d ? track.sOfKey(d, d.u0 !== undefined ? '0' : '') : 0; }
+
+// Monte Mozzarella viewpoints: the first eight are the review set
+// (overview, start chase, hairpin, aqueduct, jump, descent, coffee factory,
+// piazza); the v5 set pieces follow from 'scooters' on (?time=T or
+// setTime(t) puts the hazards at race time t).
+function monteViews() {
+const tunnel = zone('tunnel');
+const fr = (s) => track.frameAt(s);
+const SG = (name) => track.segments[track.def.segments.findIndex((x) => x.name === name)] || track.segments[0];
+const sS = (name, d = 0) => SG(name).s0 + d, sM = (name) => (SG(name).s0 + SG(name).s1) / 2;
+const HZ = (type, i = 0) => ((world.hazards && world.hazards.list.filter((h) => h.type === type)) || [])[i] || { s: 0, lateral: 0, length: 0 };
+const side = (s, lat, up, tgtLat = 0, tgtUp = 2, ahead = 0) => { const f = fr(s); const t = fr(s + ahead);
+  look([f.x + f.right.x * lat, f.y + up, f.z + f.right.z * lat], [t.x + t.right.x * tgtLat, t.y + tgtUp, t.z + t.right.z * tgtLat], [f.x, f.y, f.z]); };
+return [
+  { name: 'overview', set: () => look([cx - 300, 300, cz + 330], [cx + 30, 0, cz - 10], [cx, 0, cz]) },
+  { name: 'start-chase', set: () => chase(track.gridSlot(7).s, { lat: track.gridSlot(7).lateral }) },
+  { name: 'hairpin', set: () => chase(sS('Tornante Uno', -8), { ahead: 20, up: 3.2 }) },
+  { name: 'aqueduct', set: () => { const m = fr((bridge.s0 + bridge.s1) / 2); look([m.x + m.right.x * 80 + m.tangent.x * 34, m.y - 7, m.z + m.right.z * 80 + m.tangent.z * 34], [m.x, m.y - 6, m.z], [m.x, m.y, m.z]); } },
+  { name: 'jump', set: () => chase(ramp.s0 - 14, { ahead: 26, lookY: 0.4 }) },
+  { name: 'descent', set: () => chase(sS('Cheese Run', 4), { ahead: 30, up: 3.0 }) },
+  { name: 'coffee-factory', set: () => chase(tunnel.s0 - 26, { ahead: 30, up: 3.0, lookY: 2.5 }) },
+  { name: 'piazza', set: () => { const f = fr(20); look([f.x - f.right.x * 4 - f.tangent.x * 40, 14, f.z - f.right.z * 4 - f.tangent.z * 40], [f.x + f.right.x * 14 + f.tangent.x * 30, 1, f.z + f.right.z * 14 + f.tangent.z * 30], [f.x, f.y, f.z]); } },
+  { name: 'top', set: () => look([cx, 680, cz + 0.01], [cx, 0, cz], [cx, 0, cz]) },
+  { name: 'fountain', set: () => chase(sS('Fontana Turn', 4), { ahead: 22 }) },
+  { name: 'via-vespa', set: () => chase(sS('Via Vespa', 4), { ahead: 30 }) },
+  { name: 'laundry-lane', set: () => chase(sS('Laundry Lane', 30), { ahead: 30, up: 2.8, lookY: 2.5 }) },
+  { name: 'campanile', set: () => chase(sS('Campanile Climb', 20), { ahead: 34, up: 3.0, lookY: 4 }) },
+  { name: 'aqueduct-chase', set: () => chase(bridge.s0 - 6, { ahead: 26 }) },
+  { name: 'valley', set: () => { const m = fr((bridge.s0 + bridge.s1) / 2); look([m.x + m.right.x * 40 + m.tangent.x * 62, m.y + 6, m.z + m.right.z * 40 + m.tangent.z * 62], [m.x + m.right.x * 10, m.y - 8, m.z + m.right.z * 10], [m.x, m.y, m.z]); } },
+  { name: 'vineyard-side', set: () => side(sM('Cheese Run'), 40, 18, 0, 0) },
+  { name: 'tunnel-inside', set: () => chase(tunnel.s0 + 10, { ahead: 18, up: 2.4 }) },
+  { name: 'pizza-oven', set: () => chase(sS('Espresso Works', -30), { ahead: 40, up: 3.4, lookY: 1 }) },
+  { name: 'oven-side', set: () => { const s = sM('Pizza Oven Turn'); const f = fr(s); look([f.x + f.right.x * 16, f.y + 5, f.z + f.right.z * 16], [f.x - f.right.x * 30, f.y + 2, f.z - f.right.z * 30], [f.x, f.y, f.z]); } },
+  { name: 'home', set: () => chase(sS('Home Straight', 2), { ahead: 26 }) },
+  { name: 'town-hill', set: () => look([cx - 60, 60, b.maxZ + 120], [cx + 20, 8, cz], [cx, 0, cz]) },
+  { name: 'boost-pad', set: () => { const p = track.boostPads[0]; chase(p.s0 - 2, { lat: p.lateral, back: 5, up: 2.2, ahead: 10, lookY: 0 }); } },
+  { name: 'kicker-ramp', set: () => chase(ramp.s0 - 9, { ahead: 14, lookY: 0.6 }) },
+  { name: 'grid-front', set: () => { const f = fr(4); look([f.x + f.tangent.x * 14, f.y + 3.2, f.z + f.tangent.z * 14], [f.x - f.tangent.x * 20, f.y + 2.5, f.z - f.tangent.z * 20], [f.x - f.tangent.x * 15, f.y, f.z - f.tangent.z * 15]); } },
+  { name: 'kart-close', set: () => { const g = track.gridSlot(6); const c = P(g.s - 4.5, g.lateral + 2.2); look([c.x, c.y + 1.9, c.z], [g.position.x, g.position.y + 0.4, g.position.z], [g.position.x, g.position.y, g.position.z]); } },
+  { name: 'esses', set: () => chase(sS('Gelato Esses A', -6), { ahead: 24 }) },
+  { name: 'chicane', set: () => chase(sS('Espresso Chicane A', -8), { ahead: 24 }) },
+  { name: 'vineyard-sweep', set: () => chase(sS('Vineyard Sweep', 8), { ahead: 26 }) },
+  // ---- v5 set pieces (views 28+)
+  { name: 'scooters', set: () => chase(HZ('mover').s - 4, { ahead: 34, up: 3.0, lookY: 1.2 }) },
+  { name: 'alley-arch', set: () => { const h = HZ('mover', 1), s = h.s - 7.5, f = fr(s); look([f.x - f.right.x * 6 - f.tangent.x * 14, f.y + 4.5, f.z - f.right.z * 6 - f.tangent.z * 14], [f.x + f.right.x * 20, f.y + 3.5, f.z + f.right.z * 20], [f.x, f.y, f.z]); } },
+  { name: 'fountain-jets', set: () => chase(HZ('jet').s - 30, { ahead: 34, up: 3.2, lookY: 2 }) },
+  { name: 'jets-church', set: () => { const s = HZ('jet').s, f = fr(s); look([f.x + f.right.x * 22 + f.tangent.x * 6, f.y + 7, f.z + f.right.z * 22 + f.tangent.z * 6], [f.x - f.right.x * 30, f.y + 6, f.z - f.right.z * 30], [f.x, f.y, f.z]); } },
+  { name: 'cheese-run', set: () => chase(HZ('wheel').s - 34, { ahead: 40, up: 3.4, lookY: 1.5 }) },
+  { name: 'dairy', set: () => { const s = (HZ('wheel').s + HZ('wheel', 1).s) / 2, f = fr(s); look([f.x + f.right.x * 26 + f.tangent.x * 14, f.y + 9, f.z + f.right.z * 26 + f.tangent.z * 14], [f.x - f.right.x * 28, f.y + 4, f.z - f.right.z * 28], [f.x, f.y, f.z]); } },
+  { name: 'belvedere', set: () => chase(sS('Belvedere Turn', -14), { ahead: 30, up: 3.4, lookY: 1.5 }) },
+  { name: 'belvedere-terrace', set: () => { const s = sM('Belvedere Turn'), f = fr(s); look([f.x - f.right.x * 4 - f.tangent.x * 18, f.y + 6, f.z - f.right.z * 4 - f.tangent.z * 18], [f.x + f.right.x * 26, f.y - 4, f.z + f.right.z * 26], [f.x, f.y, f.z]); } },
+  { name: 'switchback', set: () => { const s = sM('Switchback Climb'), f = fr(s); look([f.x + 30, f.y + 70, f.z + 150], [f.x - 10, f.y - 2, f.z - 10], [f.x, f.y, f.z]); } },
+  { name: 'tornante-due', set: () => chase(sS('Tornante Due', -10), { ahead: 24, up: 3.4 }) },
+  { name: 'shrine', set: () => { const s = sM('Tornante Uno'), f = fr(s); look([f.x - f.right.x * 4 - f.tangent.x * 10, f.y + 3.2, f.z - f.right.z * 4 - f.tangent.z * 10], [f.x + f.right.x * 22, f.y + 1.5, f.z + f.right.z * 22], [f.x, f.y, f.z]); } },
+  { name: 'piazza-alta', set: () => chase(sS('Piazza Alta', -6), { ahead: 40, up: 3.4, lookY: 3 }) },
+];
+}
+// Shared helpers for the v4 tracks' viewpoints.
+const SEG = (name) => track.segments.find((sg) => sg.name === name) || track.segments[0];
+const sideLook = (s, lat, up, tgtLat = 0, tgtUp = 2, ahead = 0) => { const f = track.frameAt(s); const t = track.frameAt(s + ahead);
+  look([f.x + f.right.x * lat, f.y + up, f.z + f.right.z * lat], [t.x + t.right.x * tgtLat, t.y + tgtUp, t.z + t.right.z * tgtLat], [f.x, f.y, f.z]); };
+const common = () => [
+  { name: 'top', set: () => look([cx, 700, cz + 0.01], [cx, 0, cz], [cx, 0, cz]) },
+  { name: 'boost-pad', set: () => { const p = track.boostPads[0]; chase(p.s0 - 2, { lat: p.lateral, back: 5, up: 2.2, ahead: 10, lookY: 0 }); } },
+  { name: 'kicker-ramp', set: () => chase(ramp.s0 - 9, { ahead: 14, lookY: 0.6 }) },
+  { name: 'grid-front', set: () => { const f = track.frameAt(4); look([f.x + f.tangent.x * 14, f.y + 3.2, f.z + f.tangent.z * 14], [f.x - f.tangent.x * 20, f.y + 2.5, f.z - f.tangent.z * 20], [f.x - f.tangent.x * 15, f.y, f.z - f.tangent.z * 15]); } },
+  { name: 'kart-close', set: () => { const g = track.gridSlot(6); const c = P(g.s - 4.5, g.lateral + 2.2); look([c.x, c.y + 1.9, c.z], [g.position.x, g.position.y + 0.4, g.position.z], [g.position.x, g.position.y, g.position.z]); } },
+];
+
+// Aldrich Park viewpoints (first eight = review set; v5 path-mode layout: named `sections`,
+// one view per set piece: bike crossings, ducks, sprinklers).
+function aldrichViews() {
+const SECT = (name) => { const o = (track.def.sections || []).find((x) => x.name === name); return o ? { s0: track.sOfKey(o, '0'), s1: track.sOfKey(o, '1') } : { s0: 0, s1: 10 }; };
+const HZ = (type, k = 0) => { const d = (track.def.hazards || []).filter((h) => h.type === type)[k]; return d ? { s: track.sOfKey(d), d } : { s: 0, d: {} }; };
+const at = (s, lat = 0) => { const f = track.frameAt(s); return { x: f.x + f.right.x * lat, z: f.z + f.right.z * lat, y: f.y, f }; };
+return [
+  { name: 'overview', set: () => look([cx + 330, 260, cz + 300], [cx - 10, 0, cz], [cx, 0, cz]) },
+  { name: 'start-chase', set: () => chase(track.gridSlot(7).s, { lat: track.gridSlot(7).lateral }) },
+  { name: 'engineering-bridge', set: () => { const z = zone('bridge'), m = at((z.s0 + z.s1) / 2); const cx2 = 258.6 - 0.85 * 42, cz2 = 107.6 - 0.52 * 42; look([cx2, world.getGroundHeight(cx2, cz2) + 2.2, cz2], [m.x, m.y - 2.5, m.z], [m.x, m.y, m.z]); } },
+  { name: 'grove-turn', set: () => chase(SECT('Grove Turn').s0 + 6, { ahead: 26, up: 3.0, lookY: 2 }) },
+  { name: 'fountain-ducks', set: () => { const h = HZ('ducks'), p = at(h.s, -6); const t = at(h.s + 26, 8); look([t.x, t.y + 7, t.z], [-78, p.y, 142], [p.x, p.y, p.z]); } },
+  { name: 'west-gate', set: () => chase(SECT('West Gate').s1 - 30, { ahead: 30, up: 3.0 }) },
+  { name: 'sprinklers', set: () => chase(HZ('sprinkler').s - 26, { ahead: 30, up: 3.2, lookY: 0.5 }) },
+  { name: 'arroyo-jump', set: () => { const r = track.ramps.find((q) => q.fullWidth) || ramp; chase(r.s0 - 16, { ahead: 26, lookY: 0.4 }); } },
+  { name: 'bridge-hop', set: () => { const r = track.ramps.find((q) => !q.fullWidth) || ramp; chase(r.s0 - 14, { lat: -3, ahead: 30, lookY: 0.4 }); } },
+  { name: 'bike-crossing', set: () => chase(HZ('cyclist').s - 22, { ahead: 26, up: 2.8, lookY: 1 }) },
+  { name: 'crossing-2', set: () => chase(HZ('cyclist', 1).s - 22, { ahead: 26, up: 2.8, lookY: 1 }) },
+  { name: 'ducks-close', set: () => chase(HZ('ducks').s - 12, { ahead: 14, up: 2.2, lat: 3, lookY: 0.2 }) },
+  { name: 'sprinkler-close', set: () => { const h = HZ('sprinkler'), p = at(h.s, h.d.lateral || -12); look([p.x + p.f.tangent.x * -14 - p.f.right.x * 3, p.y + 3, p.z + p.f.tangent.z * -14 - p.f.right.z * 3], [p.x, p.y + 0.6, p.z], [p.x, p.y, p.z]); } },
+  { name: 'rock-garden', set: () => look([-14, world.getGroundHeight(-14, -46) + 5, -46], [8, world.getGroundHeight(8, -22) + 1.5, -22], [8, 0, -22]) },
+  { name: 'sculpture-arch', set: () => chase(SECT('Sculpture Garden').s0 + 4, { ahead: 30, up: 3.0, lookY: 2 }) },
+  { name: 'library-mall', set: () => chase(SECT('Library Mall').s0, { ahead: 30, up: 3.0, lookY: 3 }) },
+  { name: 'engineering-row', set: () => chase(SECT('Engineering Row').s0 + 30, { ahead: 34, up: 3.0, lookY: 4 }) },
+  { name: 'parkview', set: () => chase(SECT('Parkview Corner').s0 - 4, { ahead: 26, up: 3.0 }) },
+  { name: 'park-aerial', set: () => look([40, 120, 210], [-20, 0, -20], [0, 0, 0]) },
+  { name: 'social-science', set: () => chase(SECT('Social Science Rise').s0 + 40, { ahead: 34, up: 3.0, lookY: 4 }) },
+  { name: 'student-center', set: () => chase(SECT('Student Center Straight').s0 + 6, { ahead: 34, up: 3.0, lookY: 3 }) },
+  ...common(),
+];
+}
+
+// Laguna Beach viewpoints (first eight = review set; 17+ = the v5 set pieces + landmarks).
+function lagunaViews() {
+const beach = zone('beach'), point = zone('point'), bluff = zone('bluff'), towerZ = zone('tower') || beach;
+const HZ = (type) => ((world.hazards && world.hazards.list) || []).find((h) => h.type === type) || { s: beach.s0 + 40, len: 30, lats: [4], spots: [{ lat: 0, along: 0 }] };
+const jet = HZ('jet'), surge = HZ('surge'), lob = HZ('lob');
+const fest = (world.landmarks || []).find((m) => m.name === 'festival');
+const arch = (world.landmarks || []).find((m) => m.name === 'seaArch');
+return [
+  { name: 'overview', set: () => look([cx + 330, 170, cz + 120], [cx - 20, 0, cz], [cx, 0, cz]) },
+  { name: 'start-chase', set: () => chase(track.gridSlot(7).s, { lat: track.gridSlot(7).lateral }) },
+  { name: 'hillside', set: () => chase(SEG('Hillside Climb').s0 + 10, { ahead: 30, up: 3.0, lookY: 3 }) },
+  { name: 'crest-hairpin', set: () => chase(SEG('Crest Hairpin').s0 + 10, { ahead: 24, up: 3.2 }) },
+  { name: 'clifftop', set: () => chase(SEG('Rose Garden').s0 - 4, { ahead: 28, up: 3.0 }) },
+  { name: 'cove-jump', set: () => chase(ramp.s0 - 14, { ahead: 26, lookY: 0.4 }) },
+  { name: 'beach', set: () => chase(beach.s0 + 16, { ahead: 30, up: 3.0, lookY: 2 }) },
+  { name: 'tower', set: () => { const f = track.frameAt(towerZ.s0 + 7); look([f.x - f.right.x * 4 - f.tangent.x * 26, f.y + 5, f.z - f.right.z * 4 - f.tangent.z * 26], [f.x + f.right.x * 26, f.y + 5, f.z + f.right.z * 26], [f.x, f.y, f.z]); } },
+  { name: 'village', set: () => chase(30, { ahead: 30, up: 3.0, lookY: 3 }) },
+  { name: 'gallery-row', set: () => chase(SEG('Gallery Row').s0 + 8, { ahead: 30, up: 3.0, lookY: 3 }) },
+  { name: 'monument-point', set: () => { const f = track.frameAt((point.s0 + point.s1) / 2); look([f.x + f.right.x * 70 + f.tangent.x * 20, f.y + 14, f.z + f.right.z * 70 + f.tangent.z * 20], [f.x + f.right.x * 25, f.y, f.z + f.right.z * 25], [f.x, f.y, f.z]); } },
+  { name: 'cove-side', set: () => { const f = track.frameAt(ramp.s1 + 12); look([f.x + f.right.x * 60 + f.tangent.x * 10, f.y + 2, f.z + f.right.z * 60 + f.tangent.z * 10], [f.x, f.y - 4, f.z], [f.x, f.y, f.z]); } },
+  { name: 'bluff', set: () => chase(bluff.s0 + 20, { ahead: 34, up: 3.2, lookY: 0 }) },
+  { name: 'sea-view', set: () => { const f = track.frameAt(beach.s0 + 40); look([f.x + f.right.x * 120, 30, f.z + f.right.z * 120], [f.x - f.right.x * 30, 4, f.z - f.right.z * 30], [f.x, f.y, f.z]); } },
+  { name: 'cliff-drive', set: () => chase(SEG('Cliff Drive').s0 + 4, { ahead: 30, up: 3.0 }) },
+  { name: 'ocean-ave', set: () => chase(SEG('Ocean Avenue Turn').s0 - 4, { ahead: 26 }) },
+  { name: 'courts', set: () => { const f = track.frameAt(beach.s0 + 10); look([f.x + f.right.x * 4 + f.tangent.x * 12, f.y + 5, f.z + f.right.z * 4 + f.tangent.z * 12], [f.x - f.right.x * 30, f.y + 1, f.z - f.right.z * 30], [f.x, f.y, f.z]); } },
+  // v5 set pieces (use ?time=T or setTime(t) to pick the moment; the defaults show them mid-action)
+  { name: 'blowholes', set: () => chase(jet.s - 24, { lat: 2, ahead: 26, up: 3.0, lookY: 1.5 }) },
+  { name: 'blowholes-side', set: () => sideLook(jet.s - 6, -18, 7, 6, 2, 8) },
+  { name: 'waves', set: () => chase(surge.s - 9, { lat: -2, ahead: 30, up: 3.2, lookY: 1 }) },
+  { name: 'waves-side', set: () => sideLook(surge.s + surge.len / 2 - 34, -4, 13, 16, 0, 34) },
+  { name: 'volleyball', set: () => chase(lob.s - 20, { lat: -1, ahead: 24, up: 3.0, lookY: 2 }) },
+  { name: 'volleyball-side', set: () => sideLook(lob.s - 22, -6, 7, 18, 2, 24) },
+  { name: 'tower-jump', set: () => chase(track.ramps[1] ? track.ramps[1].s0 - 16 : ramp.s0 - 16, { lat: 3, ahead: 24, up: 3.0, lookY: 2 }) },
+  { name: 'canyon', set: () => chase(SEG('Canyon Esses A').s0 - 10, { ahead: 30, up: 3.2, lookY: 4 }) },
+  { name: 'sawdust', set: () => chase(SEG('Sawdust Bend A').s0 - 6, { ahead: 26, up: 3.0, lookY: 3 }) },
+  { name: 'festival', set: () => { if (!fest) return chase(SEG('Sawdust Straight').s0, {}); const s = SEG('Sawdust Straight').s0 - 10, f = track.frameAt(s); look([f.x + f.right.x * 6, f.y + 9, f.z + f.right.z * 6], [fest.x, f.y + 1, fest.z], [fest.x, f.y, fest.z]); } },
+  { name: 'tide-pools', set: () => { const f = track.frameAt(jet.s); const t = arch || { x: f.x + f.right.x * 30, z: f.z + f.right.z * 30 }; look([f.x - f.right.x * 10 - f.tangent.x * 20, f.y + 9, f.z - f.right.z * 10 - f.tangent.z * 20], [t.x, 2, t.z], [f.x, f.y, f.z]); } },
+  { name: 'forest-ave', set: () => chase(SEG('Forest Chicane A').s0 - 8, { ahead: 26, up: 3.0, lookY: 2 }) },
+  ...common(),
+];
+}
+
+// Krishiv's Palace viewpoints (first eight = review set).
+function palaceViews() {
+const hall = zone('hall'), lava = zone('lava'), throne = zone('throne'), rampart = zone('rampart');
+const Hz0 = (type, k = 0) => (world.hazards ? world.hazards.list.filter((h) => h.type === type)[k] : null) || { s: 0 };   // k-th hazard of a type
+return [
+  { name: 'overview', set: () => look([cx - 230, 190, cz - 220], [cx + 10, 0, cz], [cx, 0, cz]) },
+  { name: 'start-chase', set: () => chase(track.gridSlot(7).s, { lat: track.gridSlot(7).lateral, lookY: 3 }) },
+  { name: 'drawbridge', set: () => chase(bridge.s0 + 6, { ahead: 30, up: 3.0, lookY: 4 }) },
+  { name: 'crusher-hall', set: () => chase(hall.s0 + 12, { ahead: 40, up: 3.0, lookY: 3 }) },
+  { name: 'flame-gallery', set: () => chase(lava.s0 + 2, { ahead: 34, up: 3.0, lookY: 1.5 }) },
+  { name: 'spiral', set: () => chase(SEG('Spiral Climb').s0 + 30, { ahead: 26, up: 3.0, lookY: 4 }) },
+  { name: 'rampart', set: () => chase(rampart.s0 + 30, { ahead: 40, up: 3.0, lookY: 2 }) },
+  { name: 'throne', set: () => chase(throne.s0 + 60, { ahead: 50, up: 3.0, lookY: 5 }) },
+  { name: 'geysers', set: () => chase(SEG('Geyser Stairs').s0 + 10, { ahead: 30, up: 3.0, lookY: 1 }) },
+  { name: 'moat-side', set: () => { const f = track.frameAt((bridge.s0 + bridge.s1) / 2); look([f.x - 70, f.y + 6, f.z - 30], [f.x, f.y, f.z + 20], [f.x, f.y, f.z]); } },
+  { name: 'gatehouse', set: () => chase(SEG('Gatehouse').s0 - 30, { ahead: 40, up: 3.0, lookY: 7 }) },
+  { name: 'crusher-close', set: () => chase(track.sOfU(4.33) - 14, { lat: 5, ahead: 16, up: 2.6, lookY: 3 }) },
+  { name: 'flame-close', set: () => chase(track.sOfU(7.28) - 12, { lat: -2, ahead: 14, up: 2.6, lookY: 1 }) },
+  { name: 'tower', set: () => { const sg = SEG('Spiral Climb'); const f = track.frameAt((sg.s0 + sg.s1) / 2); look([f.x + 60, 40, f.z + 10], [f.x - 30, 10, f.z], [f.x, f.y, f.z]); } },
+  { name: 'rampart-row', set: () => chase(Hz0('crusher', 3).s - 22, { ahead: 24, up: 2.8, lookY: 3 }) },
+  { name: 'rampart-leap', set: () => chase(track.ramps[1].s0 - 14, { ahead: 30, up: 2.8, lookY: 0 }) },
+  { name: 'throne-side', set: () => { const sg = SEG('Throne Turn'); const f = track.frameAt(sg.s0 - 10); look([f.x - f.right.x * 4 + f.tangent.x * -30, f.y + 6, f.z - f.right.z * 4 + f.tangent.z * -30], [f.x + f.right.x * 14 + f.tangent.x * 20, f.y + 8, f.z + f.right.z * 14 + f.tangent.z * 20], [f.x, f.y, f.z]); } },
+  { name: 'back-gate', set: () => chase(SEG('Back Gate Turn').s0 - 20, { ahead: 34, up: 3.0, lookY: 4 }) },
+  { name: 'volcano', set: () => look([cx - 60, 26, cz - 120], [cx + 260, 140, cz + 1150], [cx, 0, cz]) },
+  ...common(),
+  // v5 (SPEC §16.1): the forge wing, the finale and every new set piece (hazard clock: ?time=T / setTime(t))
+  ...palaceV5Views(),
+];
+}
+// Krishiv's Palace v5 viewpoints (notes/v5-track-palace.md): appended after the
+// v4 set so the old indices stay valid.
+function palaceV5Views() {
+const Hz = () => (world.hazards ? world.hazards.list : []);
+const first = (type) => Hz().find((h) => h.type === type);
+const zs = (type) => zone(type) || { s0: 0, s1: 0 };
+const sideOf = (s, lat, up, lookLat = 0, lookUp = 2, ahead = 0) => sideLook(s, lat, up, lookLat, lookUp, ahead);
+return [
+  { name: 'overview-v5', set: () => look([cx - 250, 250, cz - 330], [cx + 20, 0, cz + 30], [cx, 0, cz]) },
+  { name: 'forge-wing', set: () => { const f = track.frameAt(SEG('Anvil Hairpin').s0); look([f.x - 120, 95, f.z - 110], [f.x + 20, 0, f.z - 20], [f.x, f.y, f.z]); } },
+  { name: 'forge', set: () => chase(SEG('The Forge').s0 - 4, { ahead: 40, up: 3.0, lookY: 2.5 }) },
+  { name: 'forge-belts', set: () => { const b = first('belt'); sideOf(b.s + b.len * 0.45, -9.5, 7.5, 3, 0, 8); } },
+  { name: 'anvil', set: () => { const sg = SEG('Anvil Hairpin'); const f = track.frameAt((sg.s0 + sg.s1) / 2 - 18); look([f.x + f.right.x * 9, f.y + 4.5, f.z + f.right.z * 9], [f.x - f.right.x * 30 - f.tangent.x * 6, f.y + 7, f.z - f.right.z * 30 - f.tangent.z * 6], [f.x, f.y, f.z]); } },
+  { name: 'anvil-side', set: () => { const f = track.frameAt(SEG('Lavafall Tunnel').s0 + 6); look([f.x - f.right.x * 9 + f.tangent.x * -2, f.y + 7, f.z - f.right.z * 9 + f.tangent.z * -2], [f.x - f.right.x * 30 - f.tangent.x * 16, f.y + 5, f.z - f.right.z * 30 - f.tangent.z * 16], [f.x, f.y, f.z]); } },
+  { name: 'lavafall', set: () => chase(zs('lavafall').s0 + 2, { ahead: 30, up: 2.8, lookY: 2.5 }) },
+  { name: 'curtains-close', set: () => { const c = first('curtain'); chase(c.s - 14, { ahead: 16, up: 2.4, lookY: 3, lat: 5 }); } },
+  { name: 'geyser-stairs', set: () => chase(SEG('Geyser Stairs').s0 + 2, { ahead: 30, up: 3.0, lookY: 1.5 }) },
+  { name: 'banquet', set: () => chase(SEG('Banquet Hall').s0 - 6, { ahead: 30, up: 3.0, lookY: 4 }) },
+  { name: 'chandeliers', set: () => { const c = Hz().filter((h) => h.type === 'chandelier')[1]; sideOf(c.s - 16, 12, 6, -2, 4, 16); } },
+  { name: 'banquet-tables', set: () => { const sg = SEG('Banquet Hall'); sideOf(sg.s0 + 6, -6, 5, -17, 2.5, 18); } },
+  { name: 'portcullis', set: () => chase(SEG('Portcullis Run').s0 - 4, { ahead: 30, up: 3.0, lookY: 4 }) },
+  { name: 'gates-close', set: () => { const g = first('portcullis'); chase(g.s - 12, { ahead: 14, up: 2.4, lookY: 3.5, lat: 2 }); } },
+  { name: 'finale', set: () => { const f = track.frameAt(SEG('Banquet Hall').s0); look([f.x - 40, 110, f.z - 120], [f.x - 20, 0, f.z + 10], [f.x, f.y, f.z]); } },
+];
+}
+const VIEW_SETS = { hilltown: monteViews, campus: aldrichViews, beach: lagunaViews, castle: palaceViews };
+const VIEWS = (VIEW_SETS[track.theme] || breezyViews)();
+let viewIndex = 0;
+let onView = '';
+function setView(v) {
+  const i = typeof v === 'number' ? v : VIEWS.findIndex((x) => x.name === v);
+  viewIndex = ((i % VIEWS.length) + VIEWS.length) % VIEWS.length;
+  VIEWS[viewIndex].set();
+  onView = VIEWS[viewIndex].name;
+  for (let k = 0; k < 3; k++) frame(1 / 60);
+  return stats();
+}
+function chaseAt(s, lat = 0, opts = {}) { chase(s, { lat, ...opts }); onView = `chase s=${s}`; for (let k = 0; k < 3; k++) frame(1 / 60); return stats(); }
+
+// Draw-call / triangle stats: total (shadow + main pass) and main pass only.
+function stats() {
+  world.update(0, focus, camera);
+  renderer.render(scene, camera);
+  const total = { calls: renderer.info.render.calls, triangles: renderer.info.render.triangles };
+  renderer.shadowMap.autoUpdate = false;
+  renderer.render(scene, camera);
+  const main = { calls: renderer.info.render.calls, triangles: renderer.info.render.triangles };
+  renderer.shadowMap.autoUpdate = true;
+  const r = { view: onView, total, main, programs: renderer.info.programs.length, textures: renderer.info.memory.textures, geometries: renderer.info.memory.geometries };
+  console.log(`[stats] ${onView}: total calls ${total.calls} tris ${total.triangles} | main calls ${main.calls} tris ${main.triangles} | programs ${r.programs} tex ${r.textures} geo ${r.geometries}`);
+  info.textContent = `${track.id} ${quality} | view ${viewIndex}: ${onView}\ncalls ${total.calls} (main ${main.calls})  tris ${(total.triangles / 1000).toFixed(0)}k (main ${(main.triangles / 1000).toFixed(0)}k)`;
+  return r;
+}
+
+// Verify every prop footprint lies outside the drivable corridor of EVERY
+// nearby track section (brute force over all samples).
+function verifyProps(margin = 0) {
+  const props = world.stats.props || [];
+  const N = track.N, sp = track.spacing;
+  const bad = [];
+  let worst = Infinity;
+  for (const [x, z, r, kind] of props) {
+    for (let i = 0; i < N; i++) {
+      const dx = x - track.px[i], dz = z - track.pz[i];
+      if (dx * dx + dz * dz > 80 * 80) continue;
+      const along = dx * track.tx[i] + dz * track.tz[i];
+      if (Math.abs(along) > sp * 0.5 + r) continue;
+      const lat = dx * track.rx[i] + dz * track.rz[i];
+      const wall = lat >= 0 ? track.wr[i] : track.wl[i];
+      const clearance = Math.abs(lat) - r - wall;
+      // only count it if the footprint overlaps this sample's slice along the track
+      if (Math.abs(along) > sp * 0.5 + Math.max(0, r - Math.max(0, Math.abs(lat) - wall))) continue;
+      if (clearance < worst) worst = clearance;
+      if (clearance < margin) { bad.push({ kind, x: +x.toFixed(1), z: +z.toFixed(1), r: +r.toFixed(2), s: +(i * sp).toFixed(0), lat: +lat.toFixed(2), wall: +wall.toFixed(2), clearance: +clearance.toFixed(2) }); break; }
+    }
+  }
+  const byKind = {};
+  for (const p of props) byKind[p[3]] = (byKind[p[3]] || 0) + 1;
+  const res = { checked: props.length, byKind, intrusions: bad.length, worstClearance: +worst.toFixed(2), sample: bad.slice(0, 12) };
+  console.log('[verifyProps]', JSON.stringify(res));
+  return res;
+}
+
+// Ground vs road: the rendered terrain must never poke through the road /
+// curbs / off-road strip (poke), and outside bridge zones the strip's outer
+// edge must sit on the ground: float = gap under the edge > 0.6 m (info;
+// barrier skirts reach 6 m down), gap = more than the skirt hides.
+// visible = pokes in front of the barrier line (must be 0); pokes = behind it.
+function verifyGround() {
+  const bridges = track.zones.filter((z) => z.type === 'bridge').map((z) => [z.s0, z.s1]);
+  for (const r of (world.stats.bridges || [])) bridges.push(r);   // decks the world builds outside 'bridge' zones
+  const onBridge = (s) => bridges.some(([s0, s1]) => track.forwardDistance(s0 - 2, s) <= track.forwardDistance(s0 - 2, s1 + 2));
+  let pokes = 0, visible = 0, floats = 0, gaps = 0, worstPoke = -Infinity, worstFloat = 0, at = null, atF = null;
+  const p = new THREE.Vector3();
+  for (let i = 0; i < track.N; i++) {
+    const s = i * track.spacing, f = track.frameAt(s);
+    const bridge = onBridge(s);
+    for (const t of [-1, -0.75, -0.5, -0.25, 0, 0.25, 0.5, 0.75, 1]) {
+      const lat = t < 0 ? t * (f.wallL + 0.55) : t * (f.wallR + 0.55);
+      track.pointAt(s, lat, p);
+      const y = f.y;                                  // strip height (ramps sit above it)
+      const g = world.getGroundHeight(p.x, p.z);
+      const inside = Math.abs(lat) < (lat < 0 ? f.wallL : f.wallR) - 0.05;   // in front of the barrier
+      if (!bridge && g - y > -0.02) { if (inside) visible++; else pokes++; if (g - y > worstPoke) { worstPoke = g - y; at = { s, lat: +lat.toFixed(1), inside } ; } }
+      if (!bridge && Math.abs(t) === 1 && y - g > 0.6) { floats++; if (y - g > 5.9) gaps++; if (y - g > worstFloat) { worstFloat = y - g; atF = { s, lat: +lat.toFixed(1) }; } }
+    }
+  }
+  const res = { visible, pokes, worstPoke: +worstPoke.toFixed(3), at, floats, gaps, worstFloat: +worstFloat.toFixed(2), atF };
+  console.log('[verifyGround]', JSON.stringify(res));
+  return res;
+}
+
+// Features on the road: item boxes, boost pads, ramps must lie on the road.
+function verifyFeatures() {
+  const proj = {};
+  const out = { boxes: 0, boxesOff: 0, pads: 0, padsOff: 0, ramps: 0, rampsOff: 0 };
+  for (const bx of track.itemBoxes) {
+    track.project(bx.position, -1, proj); out.boxes++;
+    if (Math.abs(proj.lateral) > proj.halfWidth - 0.8 || proj.surface === 'offroad') out.boxesOff++;
+  }
+  for (const p of track.boostPads) {
+    out.pads++;
+    for (const t of [0, 0.5, 1]) for (const lat of [p.lat0, p.lat1]) {
+      const f = track.frameAt(p.s0 + p.length * t);
+      if (Math.abs(lat) > f.halfWidth) { out.padsOff++; }
+    }
+  }
+  for (const r of track.ramps) {
+    out.ramps++;
+    if (!r.fullWidth) for (const t of [0, 1]) { const f = track.frameAt(r.s0 + r.length * t); if (Math.abs(r.lat0) > f.halfWidth || Math.abs(r.lat1) > f.halfWidth) out.rampsOff++; }
+  }
+  console.log('[verifyFeatures]', JSON.stringify(out));
+  return out;
+}
+
+// ------------------------------------------------------------ loop
+let last = performance.now();
+let frames = 0, fpsT = 0, fps = 0;
+function frame(dt) {
+  world.update(dt, focus, camera);
+  renderer.render(scene, camera);
+}
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  frame(dt);
+  frames++; fpsT += dt;
+  if (fpsT > 1) { fps = frames / fpsT; frames = 0; fpsT = 0; }
+  requestAnimationFrame(loop);
+}
+window.addEventListener('resize', () => {
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
+  camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
+});
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowRight') setView(viewIndex + 1);
+  if (e.key === 'ArrowLeft') setView(viewIndex - 1);
+});
+
+// Triangles / meshes per object name (static estimate: index count × instances),
+// largest first: where the budget goes.
+function breakdown(top = 25) {
+  const rows = new Map();
+  world.root.traverse((o) => {
+    if (!o.isMesh || !o.visible) return;
+    const g = o.geometry, n = (g.index ? g.index.count : g.attributes.position.count) / 3;
+    const inst = o.isInstancedMesh ? o.count : 1;
+    const key = (o.name || '?').replace(/\d+$/, '#');
+    const r = rows.get(key) || { name: key, meshes: 0, tris: 0, cast: 0 };
+    r.meshes++; r.tris += n * inst; if (o.castShadow) r.cast++;
+    rows.set(key, r);
+  });
+  const out = [...rows.values()].sort((a, b) => b.tris - a.tris).slice(0, top).map((r) => `${r.name}: ${r.meshes} mesh, ${(r.tris / 1000).toFixed(1)}k tris${r.cast ? `, ${r.cast} cast` : ''}`);
+  console.log('[breakdown]\n' + out.join('\n'));
+  return out;
+}
+
+// Advance the world's animation (and castle hazards) to time t.
+function setTime(t) {
+  const hz = world.hazards;
+  if (hz && hz.setTime) hz.setTime(t);
+  for (let k = 0; k < 3; k++) frame(0);
+  return stats();
+}
+if (params.get('time') !== null && world.hazards) world.hazards.setTime(Number(params.get('time')));
+
+Object.assign(window, { THREE, scene, camera, renderer, track, world, setView, chaseAt, stats, verifyProps, verifyFeatures, verifyGround, VIEWS, setTime, breakdown,
+  fps: () => fps, look: (c, t) => { look(c, t); for (let k = 0; k < 3; k++) frame(1 / 60); return stats(); } });
+
+if (params.get('chase') !== null) chaseAt(Number(params.get('chase')), Number(params.get('lat') || 0));
+else setView(/^\d+$/.test(params.get('view') || '') ? Number(params.get('view')) : (params.get('view') || 0));
+requestAnimationFrame(loop);
+window.__ready = true;
+</script>
+</body>
+</html>

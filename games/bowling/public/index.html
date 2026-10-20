@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<script>/* Krishiv Sports link: only does something when this page was opened from the Krishiv Sports menu (?hub=…). */
+(function(){try{var q=new URLSearchParams(location.search),hub=q.get('hub'),hr=q.get('hubRoom');if(!hub||!/^[A-Z]{4}$/.test(hr||''))return;var u=new URL(hub);if(!/^https?:$/.test(u.protocol))return;var H=window.__KRISHIV_HUB={game:'bowling',role:'tv',hub:hub,hubRoom:hr,seq:+q.get('hubSeq')||0};var r=q.get('room'),K='krishivbowling.display.room';if(r&&/^[A-Z]{4}$/.test(r)){var c=null;try{c=JSON.parse(sessionStorage.getItem(K)||'null')}catch(e){}if(!c||c.room!==r)sessionStorage.setItem(K,JSON.stringify({room:r,key:''}));}var s=document.createElement('script');s.src=u.origin+'/hub-link.js';s.async=true;document.head.appendChild(s);}catch(e){}})();</script>
+<title>Krishiv Bowling</title>
+<meta name="description" content="Krishiv Bowling — ten-pin bowling for up to four players, with phones as motion remotes.">
+<meta name="theme-color" content="#2a2118">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='34' r='26' fill='%232f7bf5'/%3E%3Ccircle cx='24' cy='24' r='4' fill='%23123'/%3E%3Ccircle cx='36' cy='21' r='4' fill='%23123'/%3E%3Ccircle cx='33' cy='33' r='4' fill='%23123'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lilita+One&family=M+PLUS+Rounded+1c:wght@500;700;800&family=Nunito:wght@600;700;800&display=swap">
+<link rel="stylesheet" href="/css/display.css">
+<script type="importmap">{"imports":{
+  "three": "/vendor/three/build/three.module.js",
+  "three/addons/": "/vendor/three/examples/jsm/",
+  "rapier": "/vendor/rapier/dist/rapier.mjs"
+}}</script>
+<script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+<canvas id="view" aria-label="Bowling lane"></canvas>
+<div id="hud"></div>
+<div id="screens"></div>
+<div id="boot" class="boot">
+  <div class="ks-logo boot-logo" role="img" aria-label="KRISHIV BOWLING">
+    <span class="ks-word w1"><span class="ks-ch"><span class="b">KRISHIV</span><span class="f">KRISHIV</span></span></span>
+    <span class="ks-word w2"><span class="ks-ch"><span class="b">BOWLING</span><span class="f">BOWLING</span></span></span>
+  </div>
+  <div class="boot-bar"><i></i></div>
+  <div class="boot-text">Loading…</div>
+</div>
+<noscript><div class="boot">This game needs JavaScript.</div></noscript>
+<script type="module" src="/js/display/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+{
+  "name": "krishiv-bowling",
+  "version": "1.0.0",
+  "description": "Krishiv Bowling: ten-pin bowling for the browser, with phones as motion remotes for up to 4 players",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node tools/scoring-test.mjs && node tools/swing-test.mjs && node tools/throw-test.mjs && node tools/net-test.mjs",
+    "test:physics": "node tools/physics-tune.mjs --quick",
+    "test:e2e": "node tools/e2e-test.mjs",
+    "tour": "node tools/tour.mjs screenshots"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "license": "ISC",
+  "private": true,
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.21.0",
+    "express": "^5.3.0",
+    "qrcode": "^1.5.4",
+    "selfsigned": "^5.5.0",
+    "socket.io": "^4.8.4",
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^25.14.0",
+    "socket.io-client": "^4.8.4"
+  }
+}

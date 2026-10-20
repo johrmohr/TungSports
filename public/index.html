@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Krishiv Sports</title>
+<meta name="description" content="Krishiv Sports — Tennis, Golf, Bowling and Krishiv Kart for up to four players, with phones as motion controllers.">
+<meta name="theme-color" content="#e9f2fb">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='4' y='4' width='56' height='56' rx='16' fill='%2329b6f6'/%3E%3Ccircle cx='32' cy='32' r='14' fill='%23d7f25c'/%3E%3Cpath d='M20 24c8 4 16 4 24 0M20 40c8-4 16-4 24 0' stroke='%23fff' stroke-width='3' fill='none'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lilita+One&family=M+PLUS+Rounded+1c:wght@500;700;800&family=Nunito:wght@600;700;800;900&display=swap">
+<link rel="stylesheet" href="/css/tv.css">
+<script type="importmap">{"imports":{
+  "three": "/vendor/three/build/three.module.js",
+  "three/addons/": "/vendor/three/examples/jsm/"
+}}</script>
+<script src="/socket.io/socket.io.js"></script>
+</head>
+<body data-phase="boot">
+<canvas id="view" aria-label="Game view"></canvas>
+<div id="hud"></div>
+<div id="ui"></div>
+<div id="boot" class="boot">
+  <div class="ks-logo boot-logo" aria-label="KRISHIV SPORTS">
+    <span class="ks-word w1"><span class="ks-ch"><span class="b">KRISHIV</span><span class="f">KRISHIV</span></span></span>
+    <span class="ks-word w2"><span class="ks-ch"><span class="b">SPORTS</span><span class="f">SPORTS</span></span></span>
+  </div>
+  <div class="boot-bar"><i></i></div>
+  <div class="boot-text">Loading…</div>
+</div>
+<noscript><div class="boot">This game needs JavaScript.</div></noscript>
+<script type="module" src="/js/tv/app.js"></script>
+</body>
+</html>

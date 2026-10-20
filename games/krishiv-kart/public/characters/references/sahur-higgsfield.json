@@ -1,0 +1,11 @@
+{
+  "character": "Tung Tung Tung Sahur",
+  "purpose": "Single-character reference for textured 3D reconstruction; not an in-game mesh",
+  "provider": "Higgsfield",
+  "model": "gpt_image_2_5",
+  "job_id": "74cb96cc-d5ea-40b7-9545-0ea4b8e29e12",
+  "quoted_credits": 0.25,
+  "image": "sahur-higgsfield.png",
+  "reference": "https://upload.wikimedia.org/wikipedia/commons/d/df/Italian_brainrot_characters.png",
+  "status": "Reference completed. 3D generation not submitted: generate_3d unavailable in connected MCP. Website fallback awaiting user sign-in."
+}

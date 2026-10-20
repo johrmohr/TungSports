@@ -1,0 +1,26 @@
+# Dependencies and generated output (every game folder)
+node_modules/
+*.log
+coverage/
+test-results/
+
+# Local HTTPS certificates (each server makes its own on first start) and secrets
+.certs/
+*.pem
+*.key
+.env
+.env.*
+!.env.example
+
+# Screenshots from the tour / e2e scripts
+screenshots/
+
+# Local notes, agent and editor state
+notes/
+.claude/
+.codex/
+.agents/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

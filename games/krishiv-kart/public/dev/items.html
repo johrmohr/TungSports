@@ -1,0 +1,814 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KRISHIV KART — items sandbox</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { color-scheme: light; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #9fd3f5; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hud { position: fixed; left: 10px; top: 8px; color: #fff; font: 600 12px/1.35 ui-monospace, Menlo, monospace;
+         text-shadow: 0 1px 2px #000, 0 0 4px #000; white-space: pre; pointer-events: none; }
+</style>
+<link rel="stylesheet" href="../css/game.css">
+<style>
+  /* the real race HUD (?gamehud=1) above the canvas; game.css styles the page dark, keep the sandbox look */
+  html, body { background: #9fd3f5; }
+  #gamehud { position: fixed; inset: 0; pointer-events: none; z-index: 5; }
+  #hud { z-index: 6; }
+</style>
+<script type="importmap">{"imports":{"three":"/vendor/three/build/three.module.js","three/addons/":"/vendor/three/examples/jsm/"}}</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="gamehud"></div>
+<div id="hud"></div>
+<script type="module">
+// RACE LOGIC sandbox: item visuals + CPU item usage on the real world.
+//
+//   /dev/items.html?scene=showcase|boxes|banana|bouncer|rocket|stink|star|zap|race
+//        v4 items:  triples|bunch|capo|bomb|espresso|accordion|beer|golden
+//        v5 group A: pepper|granita|pizza|pins|piggy|wheel|egg|prank|split|lemon|padella|taralli|befana
+//        v5 group B: calzone|ladro|potato|mortadella|tarantella|grissino|antipasto|amore|purse|tipjar|coins|states
+//        [&t=2.0]       fast-forward to sim time t and freeze (deterministic screenshots)
+//        [&follow=0]    race scene: chase-camera target kart index
+//        [&quality=low] world quality
+//        [&hud=0]       hide the debug text
+//        [&gamehud=1]   the real race HUD (hud.js) for the scene's focus kart (espresso splash, capo siren, item slot)
+//        [&view=...]    per-scene camera variants (capo: chase|target; beer: chase|side)
+// Fixed step: every rendered frame advances 1/60 s in 2 substeps, in the
+// same order as main.js (AI -> items -> karts -> collisions -> race).
+// Debug handle: window.__items { items, race, karts, views, effects, stats() }.
+import * as THREE from 'three';
+import { getTrack } from '../js/track.js';
+import { buildWorld } from '../js/world.js';
+import { Kart, resolveKartCollisions } from '../js/kart.js';
+import { CHARACTERS } from '../js/characters.js';
+import { KartView } from '../js/kartview.js';
+import { Effects } from '../js/effects.js';
+import { ChaseCamera } from '../js/camera.js';
+import { ItemSystem } from '../js/items.js';
+import { AIDriver, createAIDrivers } from '../js/ai.js';
+import { Race } from '../js/race.js';
+import { RACE, ITEM } from '../js/config.js';
+import { HUD } from '../js/hud.js';
+import { makeRng } from '../js/utils.js';
+
+const Q = new URLSearchParams(location.search);
+const SCENE = Q.get('scene') || 'showcase';
+const num = (k, d) => (Q.has(k) && Q.get(k) !== '' ? Number(Q.get(k)) : d);
+const FRAME_DT = 1 / 60, SUBSTEPS = 2;
+const hud = document.getElementById('hud');
+if (Q.get('hud') === '0') hud.style.display = 'none';
+
+// ------------------------------------------------------------ renderer/world
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+renderer.setSize(innerWidth, innerHeight, false);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 2000);
+const track = getTrack();
+const world = buildWorld(scene, track, { renderer, quality: Q.get('quality') || 'high' });
+const effects = new Effects(scene);
+addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight, false);
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+});
+
+// ------------------------------------------------------------ karts + systems
+const karts = CHARACTERS.map((c) => new Kart({ id: c.id, character: c, track }));
+karts.forEach((k, i) => k.placeOnGrid(track.gridSlot(i)));
+const views = karts.map((k) => new KartView(k, scene, effects));
+const items = new ItemSystem({ track, karts, scene, effects, rng: makeRng(4) });
+const race = new Race({ track, karts, laps: 3, player: null });
+const chase = new ChaseCamera(camera);
+
+// Place a kart at (s, lateral) facing along the road, moving at `speed`.
+function placeAt(k, s, lat = 0, speed = 0) {
+  track.pointAt(s, lat, k.position);
+  k.yaw = track.frameAt(s).yaw;
+  k.velocity.set(Math.sin(k.yaw) * speed, 0, Math.cos(k.yaw) * speed);
+  k.hint = -1;
+  track.project(k.position, -1, k.proj);
+  k.hint = k.proj.index;
+  k.position.y = k.proj.height;
+}
+// Race distances for karts teleported within lap 1 (keeps places / rocket targets sane).
+function syncDistances() { race.update(1e-4); for (const k of karts) k.distance = track.deltaS(0, k.proj.s); race.update(1e-4); }
+function give(k, item) { k.item = item; k.itemCount = item === 'triple_toot' ? 3 : 1; return items.useItem(k); }
+// Hand a kart an item through the roulette end (triples deploy their 3 items there).
+function grant(k, item) { k.item = null; k.itemCount = 0; k.rolling = true; k.rollItem = item; k.rollTimer = 0; items._finishRoll(k); }
+let hudKart = null;            // ?gamehud=1: the kart whose HUD is shown
+// Fixed camera from track coordinates: eye at (s, lat, height) looking at (s2, lat2, h2).
+const _eye = new THREE.Vector3(), _at = new THREE.Vector3();
+function camTrack(s, lat, h, s2, lat2, h2) {
+  track.pointAt(s, lat, _eye); _eye.y += h;
+  track.pointAt(s2, lat2, _at); _at.y += h2;
+  camera.position.copy(_eye);
+  camera.lookAt(_at);
+}
+// Camera behind + above an object, looking at it (optionally a point ahead of it).
+function camFollow(obj, yaw, back, up, side = 0, ahead = 4, lookUp = 0.6) {
+  const fx = Math.sin(yaw), fz = Math.cos(yaw);
+  camera.position.set(obj.x - fx * back - fz * side, obj.y + up, obj.z - fz * back + fx * side);
+  camera.lookAt(obj.x + fx * ahead, obj.y + lookUp, obj.z + fz * ahead);
+}
+
+// Start the race immediately (no intro / countdown) so items are live.
+race.skipIntro();
+race.update(RACE.countdownSeconds + 0.01);
+
+// ------------------------------------------------------------ scenes
+// Each scene: setup(), drivers (AI for moving karts), script [{t, fn}], camera(t).
+const ctxNoItems = { karts, items: null, race, player: null };
+const ctxItems = { karts, items, race, player: null };
+let drivers = [];
+let ctx = ctxNoItems;
+let script = [];
+let cameraFn = null;
+let stopAt = num('t', Infinity);
+const at = (t, fn) => script.push({ t, fn, done: false });
+const park = () => karts.forEach((k, i) => placeAt(k, 520 + i * 25, 0, 0));
+const drive = (...ks) => { drivers = ks.map((k) => new AIDriver(k, { track, skill: 0.95, rng: makeRng(k.id.length) })); };
+
+const SCENES = {
+  // the five item boxes of row 0 + a kart smashing one
+  boxes() {
+    park();
+    const k = karts[0];
+    const row = items.boxes.filter((b) => b.row === 0);
+    placeAt(k, row[1].s - 34, row[1].lateral, 22);
+    drivers = [];
+    const keep = () => { k.input.throttle = 1; k.input.steer = 0; };
+    script.push({ t: 0, fn: keep, every: true });
+    cameraFn = () => camTrack(row[2].s - 11, -1.5, 2.2, row[2].s + 2, 0.5, 0.9);
+    if (!Q.has('t')) stopAt = 1.62;
+  },
+  // bananas dropped by a kart, a second kart spinning out on one
+  banana() {
+    park();
+    const [a, b] = karts;
+    placeAt(a, 10, 2, 20); placeAt(b, -30, 2, 25);
+    drive(a);
+    at(0.35, () => give(a, 'banana'));
+    at(0.85, () => give(a, 'banana'));
+    at(1.35, () => give(a, 'banana'));
+    script.push({ t: 0, every: true, fn: () => { b.input.throttle = 1; b.input.steer = 0; } });
+    cameraFn = () => camTrack(14, -6.5, 2.0, 34, 2, 0.2);
+    if (!Q.has('t')) stopAt = 2.2;
+  },
+  // a bouncer fired at the kart ahead (and one bouncing off the wall)
+  bouncer() {
+    park();
+    const [a, b, c] = karts;
+    placeAt(a, 0, -2, 24); placeAt(b, 60, -2, 20); placeAt(c, 4, 4, 24);
+    drive(a, b, c);
+    at(0.3, () => give(a, 'bouncer'));
+    at(0.32, () => { c.yaw += 0.5; give(c, 'bouncer'); c.yaw -= 0.5; });
+    const p = new THREE.Vector3();
+    cameraFn = () => {
+      const ball = items.projectiles.find((x) => x.type === 'bouncer' && x.owner === a);
+      if (ball) p.lerp(ball.position, 0.25); else p.copy(a.position);
+      camFollow(p, track.frameAt(a.proj.s).yaw, 7, 2.6, 2.5, 6, 0.5);
+    };
+    if (!Q.has('t')) stopAt = 0.62;
+  },
+  // a rocket chasing the kart one place ahead: trail + lock-on ring
+  rocket() {
+    park();
+    const [a, b] = karts;
+    placeAt(b, 70, 4, 22); placeAt(a, 12, -5, 22);
+    for (const k of karts.slice(2)) placeAt(k, 600 + karts.indexOf(k) * 20, 0, 0);
+    syncDistances();
+    drive(a, b);
+    at(0.2, () => give(a, 'rocket'));
+    const p = new THREE.Vector3();
+    let yaw = 0;
+    cameraFn = () => {
+      const r = items.projectiles.find((x) => x.type === 'rocket');
+      if (r) { p.copy(r.position); yaw = Math.atan2(r.dir.x, r.dir.z); } else if (!p.lengthSq()) p.copy(a.position);
+      camFollow(p, yaw, 6.5, 1.6, -3.8, 8, 0.2);
+    };
+    if (!Q.has('t')) stopAt = 0.72;
+  },
+  // stink cloud on the road with karts weaving around it
+  stink() {
+    park();
+    const [a, b, c] = karts;
+    placeAt(a, 30, 0, 18); placeAt(b, -10, -3, 24); placeAt(c, -20, 4, 24);
+    drive(a, b, c);
+    ctx = ctxItems;
+    at(0.3, () => give(a, 'stink'));
+    cameraFn = () => camTrack(8, 3.5, 2.6, 30, -0.5, 1.6);
+    if (!Q.has('t')) stopAt = 1.6;
+  },
+  // rainbow star kart (KartView handles the tint + sparkles)
+  star() {
+    park();
+    const [a, b] = karts;
+    placeAt(a, 10, 0, 20); placeAt(b, 26, 3, 18);
+    drive(a, b);
+    at(0.2, () => give(a, 'star'));
+    cameraFn = () => { chase.setTarget(a); chase.update(FRAME_DT); };
+    chase.setTarget(a); chase.snap();
+    if (!Q.has('t')) stopAt = 1.5;
+  },
+  // zap from last place: lightning strikes everyone ahead
+  zap() {
+    park();
+    const ks = karts.slice(0, 5);
+    placeAt(ks[0], 52, -4, 18); placeAt(ks[1], 44, 3, 18); placeAt(ks[2], 37, -1, 18);
+    placeAt(ks[3], 30, 4.5, 18); placeAt(ks[4], 14, 0, 18);
+    syncDistances();
+    drive(...ks);
+    at(0.25, () => give(ks[4], 'zap'));
+    cameraFn = () => camTrack(4, -2, 3.2, 40, 0, 0.8);
+    if (!Q.has('t')) stopAt = 0.33;
+  },
+  // everything at once on the start straight (frozen at t = 0.8 by default)
+  showcase() {
+    park();
+    const ks = karts;
+    placeAt(ks[0], 24.2, -6, 0);      // banana dropper (parked, then moved away)
+    placeAt(ks[5], 43, -3.5, 0);      // stink dropper (parked, then moved away)
+    placeAt(ks[1], 4, -3, 18);        // bouncer shooter
+    placeAt(ks[4], 16, -0.5, 12);     // star kart
+    placeAt(ks[2], 26, 4, 14);        // rocket shooter (targets ks[3], one place ahead)
+    placeAt(ks[3], 70, 6, 14);
+    syncDistances();
+    drive(ks[1], ks[2], ks[3], ks[4]);
+    at(0.02, () => { give(ks[0], 'banana'); placeAt(ks[0], 640, 0); give(ks[5], 'stink'); placeAt(ks[5], 660, 0); });
+    at(0.1, () => give(ks[4], 'star'));
+    at(0.4, () => give(ks[2], 'rocket'));
+    at(0.5, () => give(ks[1], 'bouncer'));
+    cameraFn = () => camTrack(6, 1, 3.4, 42, 0, 0.4);
+    if (!Q.has('t')) stopAt = 0.8;
+  },
+  // ---- v4 items
+  // orbiting Triple Bouncers + Triple Rockets and a trailing Banana Bunch
+  triples() {
+    park();
+    const [a, b, c] = karts;
+    placeAt(a, 30, -4, 9); placeAt(b, 31, 4, 9); placeAt(c, 42, 0, 9);
+    grant(a, 'triple_bouncer'); grant(b, 'triple_rocket'); grant(c, 'triple_banana');
+    script.push({ t: 0, every: true, fn: () => { for (const k of [a, b, c]) { k.input.throttle = 0.35; k.input.steer = 0; } } });
+    cameraFn = () => camTrack(a.proj.s - 10, 1.5, 5.5, a.proj.s + 9, 0, 0);
+    hudKart = a;
+    if (!Q.has('t')) stopAt = 1.1;
+  },
+  // close-up of a Banana Bunch dragged through a corner
+  bunch() {
+    park();
+    const a = karts[0];
+    placeAt(a, 238, 0, 18);
+    grant(a, 'triple_banana');
+    drive(a);
+    cameraFn = () => camFollow(a.position, a.yaw, 8.5, 2.6, -3, -2, 0.2);
+    hudKart = a;
+    if (!Q.has('t')) stopAt = 1.4;
+  },
+  // Capo Crusher from 6th: ground run along the centre line, lock-on, circles, slam on 1st
+  capo() {
+    park();
+    const ks = karts.slice(0, 6);
+    placeAt(ks[0], 260, 1, 20); placeAt(ks[1], 238, -3, 20); placeAt(ks[2], 222, 3, 20);
+    placeAt(ks[3], 205, -1, 20); placeAt(ks[4], 190, 2.5, 20); placeAt(ks[5], 150, 0, 20);
+    for (const k of karts.slice(6)) placeAt(k, 600 + karts.indexOf(k) * 20, 0, 0);
+    syncDistances();
+    drive(...ks);
+    race.time = 60;
+    at(0.15, () => give(ks[5], 'capo'));
+    const p = new THREE.Vector3();
+    let yaw = 0;
+    const lead = ks[0];
+    hudKart = lead;
+    const view = Q.get('view') || 'chase';
+    cameraFn = () => {
+      const c = items.capos[0];
+      if (view === 'target' || (c && c.locked) || !c) {
+        // beside the leader, looking at it (the capo circles above, then slams)
+        camFollow(lead.position, lead.yaw, 7.5, 3.4, -5, 1, 1.6);
+        return;
+      }
+      p.lerp(c.position, 0.35);
+      yaw = Math.atan2(c.dir.x, c.dir.z);
+      camFollow(p, yaw, 7, 2.4, -2.6, 6, 0.3);
+    };
+    if (!Q.has('t')) stopAt = 3.0;
+  },
+  // Meatball Bomb lobbed into a group of rivals (lands ~20 m ahead, fuse, blast)
+  bomb() {
+    park();
+    const [a, b, c, d] = karts;
+    placeAt(a, 20, 0, 16); placeAt(b, 44, -2.5, 0); placeAt(c, 47, 3, 0); placeAt(d, 54, 0.5, 0);
+    for (const k of [b, c, d]) k.invulnTimer = 0;
+    race.time = 60;
+    at(0.1, () => give(a, 'meatball_bomb'));
+    script.push({ t: 0.12, every: true, fn: () => { a.input.throttle = 0; a.input.brake = 1; a.input.steer = 0; } });
+    cameraFn = () => camTrack(30, -6.5, 2.4, 46, 0, 0.5);
+    if (!Q.has('t')) stopAt = 0.5;
+  },
+  // Espresso Splash from 4th: cups pop over the three karts ahead, then coffee on their screens
+  espresso() {
+    park();
+    const ks = karts.slice(0, 4);
+    placeAt(ks[0], 70, 2, 16); placeAt(ks[1], 62, -2.5, 16); placeAt(ks[2], 54, 1, 16); placeAt(ks[3], 30, 0, 16);
+    syncDistances();
+    drive(...ks);
+    race.time = 60;
+    at(0.1, () => give(ks[3], 'espresso'));
+    hudKart = ks[2];
+    cameraFn = () => { chase.setTarget(hudKart); chase.update(FRAME_DT); };
+    chase.setTarget(hudKart); chase.snap();
+    if (!Q.has('t')) stopAt = 0.5;
+  },
+  // Accordion Blast: shockwave spins the karts around, destroys the items nearby
+  accordion() {
+    park();
+    const [a, b, c, d, e] = karts;
+    placeAt(a, 40, 0, 0); placeAt(b, 44, 2.6, 0); placeAt(c, 35, -2.8, 0); placeAt(d, 47, -3, 0); placeAt(e, 70, 0, 0);
+    for (const k of karts) k.invulnTimer = 0;
+    race.time = 60;
+    at(0.05, () => { give(e, 'banana'); placeAt(e, 700, 0); });
+    at(0.1, () => give(a, 'accordion'));
+    cameraFn = () => camTrack(26, 6, 6.5, 42, 0, 0.5);
+    if (!Q.has('t')) stopAt = 0.32;
+  },
+  // Beer Rocket from the back of a pack: the chug (t ~0.45), then the mug-rocket ride (t > 1)
+  beer() {
+    park();
+    const ks = karts.slice(0, 8);
+    ks.forEach((k, i) => placeAt(k, 60 - i * 7, ((i % 3) - 1) * 3, 22));
+    syncDistances();
+    drive(...ks);
+    race.time = 60;
+    const rider = ks[7];
+    at(0.05, () => give(rider, 'beer_rocket'));
+    hudKart = rider;
+    const view = Q.get('view') || 'chase';
+    cameraFn = () => {
+      if (view === 'side') camFollow(rider.position, rider.yaw, 3.2, 1.9, -5.5, 1.2, 1.1);
+      else if (view === 'front') camFollow(rider.position, rider.yaw, -4.2, 1.9, -1.4, -1, 1.5);
+      else { chase.setTarget(rider); chase.update(FRAME_DT); }
+    };
+    chase.setTarget(rider); chase.snap();
+    if (!Q.has('t')) stopAt = 0.45;
+  },
+  // Golden Toot: the window starts at the first press, presses keep the boost going (HUD meter)
+  golden() {
+    park();
+    const a = karts[0];
+    placeAt(a, 20, 0, 18);
+    drive(a);
+    race.time = 60;
+    grant(a, 'golden_toot');
+    for (let k = 0; k < 6; k++) at(0.1 + k * 0.6, () => { a.input.useItem = true; });
+    hudKart = a;
+    cameraFn = () => { chase.setTarget(a); chase.update(FRAME_DT); };
+    chase.setTarget(a); chase.snap();
+    if (!Q.has('t')) stopAt = 2.5;
+  },
+  // ---- v5 group A items (SPEC §16.2; public/js/items/<id>.js). All on the 288-383 m straight unless noted.
+  // Peperoncino Blaster: a volley of hopping chili fireballs at the karts ahead
+  pepper() {
+    park();
+    const [a, b, c] = karts;
+    placeAt(a, 296, 0, 12); placeAt(b, 330, 1.2, 9); placeAt(c, 342, -3, 9);
+    race.time = 60;
+    grant(a, 'peperoncino');
+    script.push({ t: 0, every: true, fn: () => { for (const k of [a, b, c]) { k.input.throttle = 0.5; k.input.steer = 0; } } });
+    for (let i = 0; i < 4; i++) at(0.12 + i * 0.24, () => items.useItem(a));
+    cameraFn = () => camFollow(a.position, a.yaw, 6, 2.2, -2.6, 8, 0.6);
+    hudKart = a;
+    if (!Q.has('t')) stopAt = 0.95;
+  },
+  // Granita Freeze: one kart's three orbiting scoops; another flings its fan at a rival
+  granita() {
+    park();
+    const [a, b, c] = karts;
+    placeAt(a, 300, -3.2, 8); placeAt(b, 297, 3.5, 11); placeAt(c, 326, 3, 7);
+    race.time = 60;
+    grant(a, 'granita'); grant(b, 'granita');
+    script.push({ t: 0, every: true, fn: () => { for (const k of [a, b, c]) { k.input.throttle = 0.35; k.input.steer = 0; } } });
+    at(0.7, () => items.useItem(b));
+    cameraFn = () => camTrack(a.proj.s - 8, -0.5, 4, a.proj.s + 12, 1.5, 0.4);
+    hudKart = a;
+    if (!Q.has('t')) stopAt = 0.92;
+  },
+  // Flying Pizza: thrown through two rivals, on its way out
+  pizza() {
+    park();
+    const [a, b, c] = karts;
+    placeAt(a, 296, 0, 10); placeAt(b, 314, 0.6, 6); placeAt(c, 324, -0.8, 6);
+    race.time = 60;
+    grant(a, 'flying_pizza');
+    script.push({ t: 0, every: true, fn: () => { for (const k of [a, b, c]) { k.input.throttle = 0.4; k.input.steer = 0; } } });
+    at(0.1, () => items.useItem(a));
+    cameraFn = () => camTrack(a.proj.s - 6, 4, 3.2, a.proj.s + 20, -0.5, 0.5);
+    hudKart = a;
+    if (!Q.has('t')) stopAt = 0.5;
+  },
+  // Rolling Pins: pins arcing ahead, one already stuck in the road
+  pins() {
+    park();
+    const [a, b] = karts;
+    placeAt(a, 292, 0, 14); placeAt(b, 345, 2, 6);
+    race.time = 60;
+    grant(a, 'rolling_pins');
+    script.push({ t: 0, every: true, fn: () => { for (const k of [a, b]) { k.input.throttle = 0.45; k.input.steer = 0; } } });
+    for (let i = 0; i < 3; i++) at(0.1 + i * 0.3, () => items.useItem(a));
+    cameraFn = () => camTrack(a.proj.s - 7, -4, 3.4, a.proj.s + 16, 0.5, 0.8);
+    hudKart = a;
+    if (!Q.has('t')) stopAt = 0.9;
+  },
+  // Piggy Bank: rolling down the centre line into a rival (lire drop behind it)
+  piggy() {
+    park();
+    const [a, b] = karts;
+    placeAt(a, 296, 2, 12); placeAt(b, 330, 0.4, 5);
+    race.time = 60;
+    script.push({ t: 0, every: true, fn: () => { for (const k of [a, b]) { k.input.throttle = 0.4; k.input.steer = 0; } } });
+    at(0.1, () => give(a, 'piggy_bank'));
+    const p = new THREE.Vector3();
+    cameraFn = () => {
+      const e = items.entities.find((x) => x.kind === 'piggy');
+      if (e) p.copy(e.position); else if (!p.lengthSq()) p.copy(a.position);
+      camFollow(p, track.frameAt(a.proj.s).yaw, 4.5, 1.6, -2.4, 4, 0.3);
+    };
+    if (!Q.has('t')) stopAt = 0.55;
+  },
+  // Parmesan Wheel: the giant cheese wheel bowling through two karts
+  wheel() {
+    park();
+    const [a, b, c] = karts;
+    placeAt(a, 294, 0, 12); placeAt(b, 322, -1.2, 4); placeAt(c, 330, 1.8, 4);
+    for (const k of [b, c]) k.invulnTimer = 0;
+    race.time = 60;
+    script.push({ t: 0, every: true, fn: () => { for (const k of [a, b, c]) { k.input.throttle = 0.3; k.input.steer = 0; } } });
+    at(0.1, () => give(a, 'parm_wheel'));
+    cameraFn = () => camTrack(300, 6.5, 2.6, 324, -0.5, 0.8);
+    if (!Q.has('t')) stopAt = 0.72;
+  },
+  // Surprise Egg: homing on the kart ahead (&t=1.6: the capsules it cracks into)
+  egg() {
+    park();
+    const [a, b] = karts;
+    placeAt(a, 292, 0, 14); placeAt(b, 330, 3, 12);
+    syncDistances();
+    race.time = 60;
+    script.push({ t: 0, every: true, fn: () => { for (const k of [a, b]) { k.input.throttle = 0.5; k.input.steer = 0; } } });
+    at(0.1, () => give(a, 'surprise_egg'));
+    const p = new THREE.Vector3();
+    cameraFn = () => {
+      const e = items.entities.find((x) => x.kind === 'egg');
+      if (e) p.lerp(e.position, 0.3); else if (!p.lengthSq()) p.copy(a.position);
+      camFollow(p, track.frameAt(a.proj.s).yaw, 5, 1.8, -3, 5, 0.3);
+    };
+    if (!Q.has('t')) stopAt = 0.6;
+  },
+  // Prank Box next to a real item-box row (&view=far: from 35 m, past the tell distance)
+  prank() {
+    park();
+    const row = items.boxes.filter((b) => b.row === 1);
+    const [a] = karts;
+    const s = row[0].s + 2.2;
+    placeAt(a, s, (row[1].lateral + row[2].lateral) / 2, 0);
+    give(a, 'prank_box');
+    placeAt(a, 640, 0);
+    const far = Q.get('view') === 'far';
+    cameraFn = () => camTrack(row[0].s - (far ? 35 : 9), -1, far ? 3 : 2.2, row[0].s + 2, 0, 1.0);
+    if (!Q.has('t')) stopAt = 0.6;
+  },
+  // Banana Split on the road, a rival about to slip (&t=1.2: split into three peels)
+  split() {
+    park();
+    const [a, b] = karts;
+    placeAt(a, 330, 0, 0);
+    give(a, 'banana_split');
+    placeAt(a, 640, 0);
+    placeAt(b, 306, 0.3, 12);
+    script.push({ t: 0, every: true, fn: () => { b.input.throttle = 0.6; b.input.steer = 0; } });
+    cameraFn = () => camTrack(318, -5.5, 2.4, 330, 0.5, 0.6);
+    if (!Q.has('t')) stopAt = 0.6;
+  },
+  // Sour Lemons on the road; one rival already shrunk by one
+  lemon() {
+    park();
+    const [a, b, c] = karts;
+    placeAt(a, 330, -2.5, 0); give(a, 'sour_lemon');
+    placeAt(a, 334, 3, 0); give(a, 'sour_lemon');
+    placeAt(a, 640, 0);
+    placeAt(b, 318, -2.4, 10); placeAt(c, 312, 3.5, 6);
+    script.push({ t: 0, every: true, fn: () => { for (const k of [b, c]) { k.input.throttle = 0.5; k.input.steer = 0; } } });
+    cameraFn = () => camTrack(316, 6, 2.6, 330, 0, 0.5);
+    if (!Q.has('t')) stopAt = 1.0;
+  },
+  // Padella Slam from the back: pans over everyone ahead (&t=1.85: the slam)
+  padella() {
+    park();
+    const ks = karts.slice(0, 5);
+    placeAt(ks[0], 340, 3, 10); placeAt(ks[1], 332, -3, 10); placeAt(ks[2], 324, 1, 10); placeAt(ks[3], 316, -2, 10); placeAt(ks[4], 296, 0, 10);
+    syncDistances();
+    race.time = 60;
+    script.push({ t: 0, every: true, fn: () => { for (const k of ks) { k.input.throttle = 0.3; k.input.steer = 0; } } });
+    at(0.05, () => give(ks[4], 'padella'));
+    hudKart = ks[2];
+    cameraFn = () => camFollow(ks[2].position, ks[2].yaw, 11, 3.2, -6, 6, 3.2);
+    if (!Q.has('t')) stopAt = 1.35;
+  },
+  // Taralli Hoops: three golden rings ahead of the user
+  taralli() {
+    park();
+    const [a] = karts;
+    placeAt(a, 300, 0, 10);
+    race.time = 60;
+    script.push({ t: 0, every: true, fn: () => { a.input.throttle = 0.4; a.input.steer = 0; } });
+    at(0.05, () => give(a, 'taralli'));
+    cameraFn = () => camFollow(a.position, a.yaw, 7, 2.6, 0, 10, 1.2);
+    hudKart = a;
+    if (!Q.has('t')) stopAt = 0.6;
+  },
+  // Befana's Broom: the witch flying over the pack ahead, coal raining in front of the leaders
+  befana() {
+    park();
+    const ks = karts.slice(0, 5);
+    placeAt(ks[0], 360, 3, 14); placeAt(ks[1], 350, -3, 14); placeAt(ks[2], 340, 0, 14); placeAt(ks[3], 330, 4, 14); placeAt(ks[4], 300, 0, 14);
+    syncDistances();
+    race.time = 60;
+    script.push({ t: 0, every: true, fn: () => { for (const k of ks) { k.input.throttle = 0.3; k.input.steer = 0; } } });
+    at(0.05, () => give(ks[4], 'befana'));
+    const p = new THREE.Vector3();
+    cameraFn = () => {
+      const e = items.entities.find((x) => x.kind === 'befana');
+      if (e) p.lerp(e.position, 0.35); else if (!p.lengthSq()) p.copy(ks[2].position);
+      camTrack(ks[4].proj.s + 6, -7, 5, track.project(p, -1, {}).s + 4, 0, 4);
+    };
+    hudKart = ks[2];
+    if (!Q.has('t')) stopAt = 0.75;
+  },
+  // ---- v5 group B (self-buff / transform / kart states) + the lire
+  // Chomping Calzone mounted on the bumper, a rival just ahead in reach (&t=0.75: mid-chomp)
+  calzone() {
+    park();
+    const [a, b] = karts;
+    placeAt(a, 300, 0, 9); placeAt(b, 309, 0.4, 7);
+    b.invulnTimer = 0;
+    race.time = 60;
+    script.push({ t: 0, every: true, fn: () => { for (const k of [a, b]) { k.input.throttle = 0.35; k.input.steer = 0; } } });
+    at(0.05, () => give(a, 'calzone'));
+    cameraFn = () => camFollow(a.position, a.yaw, -2.5, 2.0, 6.5, 3, 0.6);
+    hudKart = a;
+    if (!Q.has('t')) stopAt = 0.45;
+  },
+  // Ladro Mask: a see-through ghost with the burglar's mask, slipping past a rival
+  ladro() {
+    park();
+    const [a, b] = karts;
+    placeAt(a, 300, -1.2, 10); placeAt(b, 300.5, 1.4, 10);
+    syncDistances();
+    race.time = 60;
+    script.push({ t: 0, every: true, fn: () => { for (const k of [a, b]) { k.input.throttle = 0.4; k.input.steer = 0; } } });
+    at(0.05, () => give(a, 'ladro'));
+    cameraFn = () => camFollow(a.position, a.yaw, -3.4, 1.5, -1.6, 0, 1.0);
+    hudKart = a;
+    if (!Q.has('t')) stopAt = 0.6;
+  },
+  // Hot Potato steaming on a kart (&t=7.5: the last-seconds panic)
+  potato() {
+    park();
+    const [a, b] = karts;
+    placeAt(a, 300, 0, 9); placeAt(b, 286, 3, 9);
+    race.time = 60;
+    script.push({ t: 0, every: true, fn: () => { for (const k of [a, b]) { k.input.throttle = 0.35; k.input.steer = 0; } } });
+    at(0.05, () => grant(a, 'hot_potato'));
+    cameraFn = () => camFollow(a.position, a.yaw, 1.5, 1.6, 5.5, 1, 1.3);
+    hudKart = a;
+    if (!Q.has('t')) stopAt = 0.8;
+  },
+  // Maxi Mortadella: the giant rolling up on two rivals (&t=1.2: one flattened)
+  mortadella() {
+    park();
+    const [a, b, c] = karts;
+    placeAt(a, 296, 0, 12); placeAt(b, 309, -1.0, 2); placeAt(c, 312, 3.4, 2);
+    for (const k of [b, c]) k.invulnTimer = 0;
+    race.time = 60;
+    script.push({ t: 0, every: true, fn: () => { a.input.throttle = 0.5; for (const k of [a, b, c]) k.input.steer = 0; for (const k of [b, c]) k.input.throttle = 0; } });
+    at(0.05, () => give(a, 'mortadella'));
+    cameraFn = () => camTrack(a.proj.s - 9, 7, 4.5, a.proj.s + 6, 0, 1.4);
+    hudKart = a;
+    if (!Q.has('t')) stopAt = 0.75;
+  },
+  // Tarantella Jump: the dance leap over a banana in the kart's path
+  tarantella() {
+    park();
+    const [a, b] = karts;
+    placeAt(b, 316, 0, 0); give(b, 'banana'); placeAt(b, 640, 0);
+    placeAt(a, 300, 0, 18);
+    script.push({ t: 0, every: true, fn: () => { a.input.throttle = 0.8; a.input.steer = 0; } });
+    at(0.15, () => give(a, 'tarantella'));
+    cameraFn = () => camTrack(308, -7, 2.0, 314, 0.5, 1.6);
+    if (!Q.has('t')) stopAt = 0.62;
+  },
+  // Grissino Swipe: the breadstick tail (&t=0.6: mid-swing, a rival spinning)
+  grissino() {
+    park();
+    const [a, b] = karts;
+    placeAt(a, 300, -1.3, 8); placeAt(b, 300.5, 1.6, 8);
+    b.invulnTimer = 0;
+    race.time = 60;
+    script.push({ t: 0, every: true, fn: () => { for (const k of [a, b]) { k.input.throttle = 0.3; k.input.steer = 0; } } });
+    at(0.05, () => give(a, 'grissino'));
+    at(0.45, () => items.useItem(a));
+    cameraFn = () => camFollow(a.position, a.yaw, 6, 3.2, -3.5, 0, 0.5);
+    hudKart = a;
+    if (!Q.has('t')) stopAt = 0.3;
+  },
+  // Antipasto Platter: eight little plates orbiting the kart
+  antipasto() {
+    park();
+    const [a] = karts;
+    placeAt(a, 300, 0, 6);
+    race.time = 60;
+    script.push({ t: 0, every: true, fn: () => { a.input.throttle = 0.2; a.input.steer = 0; } });
+    at(0.05, () => grant(a, 'antipasto'));
+    cameraFn = () => camFollow(a.position, a.yaw, 6.5, 3.4, 1.5, 0, 0.6);
+    hudKart = a;
+    if (!Q.has('t')) stopAt = 0.5;
+  },
+  // Amore Hearts: two hearts circling the kart
+  amore() {
+    park();
+    const [a] = karts;
+    placeAt(a, 300, 0, 6);
+    script.push({ t: 0, every: true, fn: () => { a.input.throttle = 0.2; a.input.steer = 0; } });
+    at(0.05, () => give(a, 'amore'));
+    cameraFn = () => camFollow(a.position, a.yaw, 5.5, 2.4, 2.5, 0, 0.8);
+    if (!Q.has('t')) stopAt = 0.5;
+  },
+  // Lira Purse: the purse pops up and tosses two lire
+  purse() {
+    park();
+    const [a] = karts;
+    placeAt(a, 300, 0, 4);
+    script.push({ t: 0, every: true, fn: () => { a.input.throttle = 0.1; a.input.steer = 0; } });
+    at(0.05, () => give(a, 'lira_purse'));
+    cameraFn = () => camFollow(a.position, a.yaw, 5, 2.2, 2.2, 0, 1.6);
+    hudKart = a;
+    if (!Q.has('t')) stopAt = 0.4;
+  },
+  // Tip Jar: the jar over the kart, lire spilling behind for the follower
+  tipjar() {
+    park();
+    const [a, b] = karts;
+    placeAt(a, 300, 0, 7); placeAt(b, 288, 0.5, 7);
+    script.push({ t: 0, every: true, fn: () => { for (const k of [a, b]) { k.input.throttle = 0.25; k.input.steer = 0; } } });
+    at(0.05, () => { a.item = 'tip_jar'; a.itemCount = 6; items.useItem(a); });
+    for (const t of [0.4, 0.75, 1.1]) at(t, () => items.useItem(a));
+    cameraFn = () => camFollow(a.position, a.yaw, 7, 3.2, 3.5, -3, 0.6);
+    hudKart = a;
+    if (!Q.has('t')) stopAt = 1.4;
+  },
+  // the lire on the track: the first coin line, seen from a kart about to collect it (&gamehud=1: the counter)
+  coins() {
+    park();
+    const [a] = karts;
+    const line = track.coinLines[num('line', 0)] || { s: 300, lateral: 0 };
+    placeAt(a, line.s - 12, line.lateral, 9);
+    a.coins = 7;
+    script.push({ t: 0, every: true, fn: () => { a.input.throttle = 0.3; a.input.steer = 0; } });
+    cameraFn = () => camFollow(a.position, a.yaw, 6, 2.4, 0, 8, 0.8);
+    hudKart = a;
+    if (!Q.has('t')) stopAt = 0.5;
+  },
+  // kart states side by side: frozen, shrunk, squashed, sooted, ghost, giant
+  states() {
+    park();
+    const ks = karts.slice(0, 6);
+    const lat = [-6, -3.6, -1.2, 1.2, 3.6, 6.4];
+    ks.forEach((k, i) => placeAt(k, 300 + (i === 5 ? 3 : 0), lat[i], 0));
+    for (const k of ks) k.invulnTimer = 0;
+    at(0.02, () => { ks[0].freeze(9); ks[1].shrink(9, 'test'); ks[2].squash(9, 'test'); ks[3].soot(9); ks[4].ghost(9); ks[5].grow(9); });
+    cameraFn = () => camTrack(286, 0, 4.2, 302, 0, 0.8);
+    if (!Q.has('t')) stopAt = 0.8;
+  },
+  // full CPU race with items; chase cam on `follow`
+  race() {
+    karts.forEach((k, i) => k.placeOnGrid(track.gridSlot(i)));
+    race.startCountdown();
+    drivers = createAIDrivers(karts, { track, difficulty: Q.get('difficulty') || 'normal', rng: makeRng(num('seed', 1)) });
+    ctx = ctxItems;
+    const target = karts[Math.min(num('follow', 0), karts.length - 1)];
+    hudKart = target;
+    chase.setTarget(target); chase.snap();
+    cameraFn = () => chase.update(FRAME_DT);
+  },
+};
+(SCENES[SCENE] || SCENES.showcase)();
+
+// ?cam=near[&what=hazard|projectile|kart][&idx=0][&dist=5][&side=2][&up=1.6]:
+// frame one object from close up (camera behind it along the road + to the side).
+if (Q.get('cam') === 'near') {
+  const what = Q.get('what') || 'hazard', idx = num('idx', 0);
+  const dist = num('dist', 5), side = num('side', 2), up = num('up', 1.6);
+  const tmpProj = {};
+  const pos = new THREE.Vector3();
+  cameraFn = () => {
+    const list = what === 'entity' ? items.entities.filter((e) => !Q.get('kind') || e.kind === Q.get('kind'))
+      : what === 'projectile' ? items.projectiles : what === 'kart' ? karts : what === 'bomb' ? items.bombs
+      : what === 'capo' ? items.capos : what === 'attached' ? items.attached : items.hazards;
+    const o = list[Math.min(idx, list.length - 1)];
+    if (!o) return;
+    pos.copy(o.position);
+    track.project(pos, -1, tmpProj);
+    const t = tmpProj.tangent, r = tmpProj.right;
+    camera.position.set(pos.x - t.x * dist + r.x * side, pos.y + up, pos.z - t.z * dist + r.z * side);
+    camera.lookAt(pos.x, pos.y + 0.35, pos.z);
+  };
+}
+if (SCENE !== 'race') { for (const k of karts) k.frozen = false; }
+
+// ------------------------------------------------------------ the real race HUD (optional)
+let gameHud = null;
+if (Q.get('gamehud') === '1') {
+  gameHud = new HUD(document.getElementById('gamehud'));
+  gameHud.setTrack(track);
+  gameHud.show();
+}
+
+// ------------------------------------------------------------ loop
+let simTime = 0, stopped = false;
+const focus = new THREE.Vector3();
+function step() {
+  const h = FRAME_DT / SUBSTEPS;
+  for (let n = 0; n < SUBSTEPS; n++) {
+    for (const d of drivers) d.update(h, ctx);
+    for (const e of script) {
+      if (e.every) { if (simTime >= e.t) e.fn(); }
+      else if (!e.done && simTime >= e.t) { e.done = true; e.fn(); }
+    }
+    items.update(h, race);
+    for (const k of karts) k.update(h);
+    resolveKartCollisions(karts);
+    race.update(h);
+    simTime += h;
+  }
+  for (const v of views) v.update(FRAME_DT, camera);
+  if (cameraFn) cameraFn(simTime);
+  effects.update(FRAME_DT, camera);
+  if (gameHud) {
+    gameHud.update(FRAME_DT, { player: hudKart || karts[0], race, karts, items, phoneConnected: false });
+    if (typeof gameHud.setCoins === 'function') gameHud.setCoins((hudKart || karts[0]).coins | 0);   // v5 lire, as main.js
+  }
+}
+const stats = () => ({
+  t: +simTime.toFixed(3), calls: renderer.info.render.calls, tris: renderer.info.render.triangles,
+  particles: effects.count, hazards: items.hazards.length, projectiles: items.projectiles.map((p) => `${p.type}:${p.mode}`),
+  boxesActive: items.boxes.filter((b) => b.active).length, used: items.used,
+  hits: karts.filter((k) => k.isDisabled()).map((k) => k.id),
+  capos: items.capos.map((c) => `${c.phase}${c.locked ? '*' : ''}`), bombs: items.bombs.map((b) => b.phase),
+  attached: items.attached.length, beer: karts.filter((k) => k.beer).map((k) => `${k.id}:${k.beer.phase}`),
+  ink: karts.filter((k) => k.ink > 0 || k.inkIncoming).map((k) => `${k.id}:${k.ink.toFixed(2)}`),
+  entities: items.entities.map((e) => e.kind), pluginErrors: items.pluginErrors,
+});
+window.__items = { items, race, karts, views, effects, scene, renderer, stats, hud: gameHud };
+
+let fps = 0, frames = 0, last = performance.now(), hudT = 0;
+function frame() {
+  if (!stopped) {
+    let guard = 0;
+    do {
+      step();
+      if (simTime >= stopAt - 1e-6) { stopped = true; console.log(`[items] stopped at t=${simTime.toFixed(3)}`); break; }
+    } while (isFinite(stopAt) && simTime < stopAt - 0.2 && ++guard < 20);
+  }
+  focus.copy(camera.position).lerp(_at.lengthSq() ? _at : camera.position, 0.5);
+  world.update(stopped ? 0 : FRAME_DT, cameraFn && SCENE === 'race' ? chase.target?.position || focus : focus, camera);
+  renderer.render(scene, camera);
+  frames++;
+  const now = performance.now();
+  if (now - last > 500) { fps = (frames * 1000) / (now - last); frames = 0; last = now; }
+  if ((hudT -= FRAME_DT) <= 0) {
+    hudT = 0.25;
+    const s = stats();
+    hud.textContent = `${SCENE}  t ${s.t}${stopped ? ' (stopped)' : ''}  fps ${fps.toFixed(0)}\n` +
+      `calls ${s.calls}  tris ${s.tris}  particles ${s.particles}\n` +
+      `boxes ${s.boxesActive}/${items.boxes.length}  hazards ${s.hazards}  projectiles ${s.projectiles.join(' ') || '-'}\n` +
+      `race ${race.state} ${race.time.toFixed(1)}s  leader ${race.standings[0].id}  disabled ${s.hits.join(',') || '-'}\n` +
+      `capos ${s.capos.join(' ') || '-'}  bombs ${s.bombs.join(' ') || '-'}  attached ${s.attached}  beer ${s.beer.join(' ') || '-'}  ink ${s.ink.join(' ') || '-'}\n` +
+      `v5 entities ${s.entities.join(' ') || '-'}  plugin errors ${s.pluginErrors}`;
+  }
+  requestAnimationFrame(frame);
+}
+frame();
+setTimeout(() => console.log('[items] stats', JSON.stringify(stats())), 1500);
+</script>
+</body>
+</html>

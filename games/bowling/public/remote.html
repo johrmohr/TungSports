@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<script>/* Krishiv Sports link: only does something when this page was opened from the Krishiv Sports menu (?hub=…). */
+(function(){try{var q=new URLSearchParams(location.search),hub=q.get('hub'),hr=q.get('hubRoom');if(!hub||!/^[A-Z]{4}$/.test(hr||''))return;var u=new URL(hub);if(!/^https?:$/.test(u.protocol))return;var H=window.__KRISHIV_HUB={game:'bowling',role:'phone',hub:hub,hubRoom:hr,seq:+q.get('hubSeq')||0};H.slot='.tb-right';H.cls='icon-btn';['name','color','character','hand'].forEach(function(k){var v=q.get(k);if(v)try{localStorage.setItem('bowl.'+k,v)}catch(e){}});var s=document.createElement('script');s.src=u.origin+'/hub-link.js';s.async=true;document.head.appendChild(s);}catch(e){}})();</script>
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="theme-color" content="#eef3f8">
+  <meta name="format-detection" content="telephone=no">
+  <title>Krishiv Bowling Remote</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='18' y='3' width='28' height='58' rx='12' fill='%23f4f6f9' stroke='%2389929e' stroke-width='3'/%3E%3Ccircle cx='32' cy='38' r='7' fill='%232f7bf5'/%3E%3Cpath d='M32 12v12M26 18h12' stroke='%23555' stroke-width='4'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lilita+One&family=M+PLUS+Rounded+1c:wght@500;700;800&family=Nunito:wght@600;700;800&display=swap">
+  <link rel="stylesheet" href="/css/remote.css">
+  <script src="/socket.io/socket.io.js"></script>
+  <script type="module" src="/js/remote/remote.js"></script>
+</head>
+<body data-screen="connecting">
+<div class="app" id="app">
+
+  <!-- ===================================================== top bar -->
+  <header class="topbar" id="topbar">
+    <div class="me" id="me">
+      <span class="me-pip" id="me-pip">P1</span>
+      <span class="me-name" id="me-name">Player</span>
+    </div>
+    <div class="tb-mid" id="tb-mid"></div>
+    <div class="tb-right">
+      <span class="conn" id="conn" title="Connection"><i></i><b id="conn-text">…</b></span>
+      <button class="icon-btn" id="btn-plus" aria-label="Pause">+</button>
+      <button class="icon-btn" id="btn-settings" aria-label="Settings">⚙</button>
+    </div>
+  </header>
+
+  <main class="screens">
+
+    <!-- ===================================================== status screens -->
+    <section class="screen center" data-for="connecting">
+      <div class="spinner" aria-hidden="true"></div>
+      <h2 id="connecting-title">Connecting…</h2>
+      <p class="muted" id="connecting-sub">Finding the game on this Wi-Fi</p>
+    </section>
+
+    <section class="screen center" data-for="insecure">
+      <div class="big-icon">🔒</div>
+      <h2>Open the secure page</h2>
+      <p class="muted">Phones only share their motion sensors with <b>https://</b> pages. Open the secure address, then accept the certificate warning once.</p>
+      <a class="btn primary" id="insecure-link" href="#">Open secure page</a>
+      <button class="btn ghost" id="btn-insecure-touch">Use touch controls instead</button>
+    </section>
+
+    <section class="screen center" data-for="error">
+      <div class="big-icon" id="error-icon">⚠️</div>
+      <h2 id="error-title">Something went wrong</h2>
+      <p class="muted" id="error-text"></p>
+      <button class="btn primary" id="btn-error-retry">Try again</button>
+      <button class="btn ghost" id="btn-error-code">Enter a room code</button>
+    </section>
+
+    <!-- ===================================================== room code -->
+    <section class="screen" data-for="code">
+      <div class="ks-logo" role="img" aria-label="KRISHIV BOWLING"><span class="ks-word w1"><span class="ks-ch"><span class="b">KRISHIV</span><span class="f">KRISHIV</span></span></span><span class="ks-word w2"><span class="ks-ch"><span class="b">BOWLING</span><span class="f">BOWLING</span></span></span></div>
+      <div class="logo-sub">Remote</div>
+      <h2>Enter the room code</h2>
+      <p class="muted">It is under the QR code on the TV.</p>
+      <input id="code-input" class="code-input" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" inputmode="text" placeholder="ABCD" aria-label="Room code">
+      <p class="error-line" id="code-error" role="alert"></p>
+      <button class="btn primary" id="btn-code">Join</button>
+    </section>
+
+    <!-- ===================================================== join / profile -->
+    <section class="screen" data-for="join">
+      <div class="ks-logo" role="img" aria-label="KRISHIV BOWLING"><span class="ks-word w1"><span class="ks-ch"><span class="b">KRISHIV</span><span class="f">KRISHIV</span></span></span><span class="ks-word w2"><span class="ks-ch"><span class="b">BOWLING</span><span class="f">BOWLING</span></span></span></div>
+      <div class="logo-sub">Remote</div>
+      <label class="field">
+        <span>Your name</span>
+        <input id="name-input" maxlength="10" autocomplete="nickname" spellcheck="false" placeholder="Player">
+      </label>
+      <div class="field">
+        <div class="field-head">
+          <span>Brainrot Character</span>
+          <span class="char-main-tag">Tung Tung is Main</span>
+        </div>
+        <div class="char-grid" id="char-grid" role="radiogroup" aria-label="Brainrot Character"></div>
+      </div>
+      <div class="field">
+        <span>Ball colour</span>
+        <div class="swatches" id="swatches" role="radiogroup" aria-label="Ball colour"></div>
+      </div>
+      <div class="field">
+        <span>Bowling hand</span>
+        <div class="seg" id="hand-seg" role="radiogroup" aria-label="Bowling hand">
+          <button data-hand="left" role="radio">Left</button>
+          <button data-hand="right" role="radio">Right</button>
+        </div>
+      </div>
+      <button class="btn primary big" id="btn-join">Join game</button>
+      <ul class="safety">
+        <li>Grip your phone with your <b>whole hand</b>. You bowl by lifting your <b>thumb</b> — never let go of the phone.</li>
+        <li>Clear the space around you. Gentle swings work — full power comes early.</li>
+      </ul>
+    </section>
+
+    <!-- ===================================================== lobby -->
+    <section class="screen" data-for="lobby">
+      <div class="badge-card" id="lobby-badge">
+        <div class="badge-avatar-box">
+          <div class="badge-ball" id="lobby-ball"></div>
+          <div class="badge-char-icon" id="lobby-char-icon">🥁</div>
+        </div>
+        <div class="badge-meta">
+          <div class="badge-slot" id="lobby-slot">Player 1</div>
+          <div class="badge-name" id="lobby-name">Player</div>
+          <div class="badge-char" id="lobby-char">Tung Tung Tung Sahur</div>
+        </div>
+        <button class="btn small ghost" id="btn-edit">Edit</button>
+      </div>
+      <h3 class="section-title">Players</h3>
+      <ul class="player-list" id="lobby-players"></ul>
+      <button class="btn primary big" id="btn-start" hidden>Start game</button>
+      <p class="muted center-text" id="lobby-note">Waiting for Player 1 to start…</p>
+      <details class="howto">
+        <summary>How to bowl</summary>
+        <ol>
+          <li>Hold the phone like a remote control: screen up, top pointing at the TV.</li>
+          <li><b>◀ ▶</b> moves your bowler. Press <b>A</b> to switch to <b>Turn</b> and aim.</li>
+          <li>Press and <b>hold B</b>, swing your arm back, then forward like rolling a real ball.</li>
+          <li><b>Lift your thumb</b> at the bottom of the swing to let go. Twist your wrist as you let go to curve the ball.</li>
+        </ol>
+      </details>
+    </section>
+
+    <!-- ===================================================== waiting for others -->
+    <section class="screen" data-for="wait">
+      <div class="turn-card" id="wait-card">
+        <div class="turn-ball" id="wait-ball"></div>
+        <div class="turn-text"><small>Now bowling</small><b id="wait-name">Player 2</b></div>
+      </div>
+      <p class="wait-result" id="wait-result"></p>
+      <ul class="mini-board" id="wait-board"></ul>
+      <p class="muted center-text" id="wait-next-line"></p>
+    </section>
+
+    <!-- ===================================================== get ready (turn intro) -->
+    <section class="screen center" data-for="ready">
+      <div class="ready-ring" id="ready-ring"><span>Your turn!</span></div>
+      <p class="ready-frame" id="ready-frame">Frame 1</p>
+      <p class="muted">Tap to continue</p>
+    </section>
+
+    <!-- ===================================================== aim (your turn) -->
+    <section class="screen aim" data-for="aim">
+      <div class="aim-head">
+        <b id="aim-title">Your turn!</b>
+        <span id="aim-frame">Frame 1 · Ball 1</span>
+      </div>
+      <div class="remote-body">
+        <div class="mode-switch" id="mode-switch" aria-live="polite">
+          <span data-mode="move">MOVE</span><span data-mode="turn">TURN</span>
+        </div>
+        <div class="pad-row">
+          <button class="pad-btn arrow" id="btn-left" aria-label="Left">◀</button>
+          <button class="pad-btn a-btn" id="btn-a" aria-label="A: switch Move or Turn">A</button>
+          <button class="pad-btn arrow" id="btn-right" aria-label="Right">▶</button>
+        </div>
+        <div class="pad-row small">
+          <button class="pad-btn pill" id="btn-zoom" aria-label="Zoom to the pins">▲ Zoom</button>
+        </div>
+      </div>
+      <div class="b-hint" id="b-hint">Hold <b>B</b>, swing back &amp; forward, lift your thumb to bowl</div>
+    </section>
+
+    <!-- ===================================================== watching your ball -->
+    <section class="screen center" data-for="watch">
+      <p class="watch-title" id="watch-title">Rolling…</p>
+      <p class="watch-sub" id="watch-sub"></p>
+      <div class="release-meter" id="release-meter" hidden>
+        <svg viewBox="-112 -26 224 126" aria-hidden="true">
+          <path class="rm-arc" d="M -80 0 A 80 80 0 0 0 80 0"></path>
+          <path class="rm-zone" id="rm-zone" d=""></path>
+          <circle class="rm-shoulder" cx="0" cy="0" r="7"></circle>
+          <circle class="rm-head" cx="0" cy="-16" r="9"></circle>
+          <line class="rm-arm" id="rm-arm" x1="0" y1="0" x2="0" y2="80"></line>
+          <circle class="rm-dot" id="rm-dot" cx="0" cy="80" r="9"></circle>
+          <text x="-100" y="12" class="rm-txt">BACK</text>
+          <text x="100" y="12" class="rm-txt" text-anchor="end">FRONT</text>
+        </svg>
+        <div class="release-label" id="release-label"></div>
+        <div class="release-hint" id="release-hint"></div>
+      </div>
+      <p class="watch-tip" id="watch-tip"></p>
+      <button class="btn ghost" id="btn-skip" hidden>Skip ▸▸</button>
+    </section>
+
+    <!-- ===================================================== paused -->
+    <section class="screen center" data-for="paused">
+      <h2>Paused</h2>
+      <button class="btn primary big" id="btn-resume">Continue</button>
+      <button class="btn ghost" id="btn-quit">Quit to lobby</button>
+    </section>
+
+    <!-- ===================================================== game over -->
+    <section class="screen" data-for="over">
+      <h2 class="over-title" id="over-title">Game over</h2>
+      <ul class="standings" id="over-standings"></ul>
+      <button class="btn primary big" id="btn-again" hidden>Play again</button>
+      <button class="btn ghost" id="btn-lobby" hidden>Back to lobby</button>
+      <p class="muted center-text" id="over-note"></p>
+    </section>
+  </main>
+
+  <!-- ===================================================== B button / grip zone -->
+  <div class="grip" id="grip" role="button" aria-label="B button: hold, swing your arm, lift your thumb to bowl">
+    <div class="grip-face">
+      <div class="grip-b">B</div>
+      <div class="grip-label" id="grip-label">HOLD</div>
+      <div class="flick-ball" id="flick-ball"></div>
+    </div>
+    <div class="swing-face">
+      <div class="swing-title" id="swing-title">SWING!</div>
+      <div class="swing-meter"><i id="swing-arm"></i></div>
+      <div class="swing-sub" id="swing-sub">Lift your thumb at the bottom of the swing</div>
+    </div>
+  </div>
+
+  <!-- ===================================================== settings sheet -->
+  <div class="sheet" id="settings" hidden>
+    <div class="sheet-card">
+      <h3>Settings</h3>
+      <div class="field">
+        <span>Throw with</span>
+        <div class="seg" id="mode-seg">
+          <button data-mode="motion">Motion</button>
+          <button data-mode="touch">Touch flick</button>
+        </div>
+      </div>
+      <label class="check"><input type="checkbox" id="opt-invert"> Invert curve direction</label>
+      <label class="check"><input type="checkbox" id="opt-sound" checked> Sounds on this phone</label>
+      <p class="muted small" id="sensor-status">Motion sensors: checking…</p>
+      <button class="btn ghost" id="btn-motion-retry" hidden>Enable motion again</button>
+      <button class="btn primary" id="btn-settings-close">Done</button>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</div>
+</body>
+</html>
